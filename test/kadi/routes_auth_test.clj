@@ -7,8 +7,9 @@
             [kadi.game :as game]))
 
 ;; Ensure DB schema exists for tests
-(defn setup-db [_]
-  (db/init!))
+(defn setup-db [f]
+  (db/init!)
+  (f))
 
 (use-fixtures :once setup-db)
 
@@ -64,3 +65,47 @@
     (let [html (views/signin-page {})]
       (is (str/includes? html "name=\"identifier\""))
       (is (str/includes? html "username")))))
+
+(defn- render-state [state player-id]
+  (views/game-play-content {:player {:id player-id}
+                            :game {:short_code "TEST" :state state}}))
+
+(defn- live-game []
+  (-> (game/new-game "TEST")
+      (#(:ok (game/join-player % {:id 1 :name "Alice"})))
+      (#(:ok (game/join-player % {:id 2 :name "Bob"})))
+      (game/start-game {})))
+
+(deftest game-play-content-render-test
+  (testing "normal turn renders play actions and status"
+    (let [html (render-state (live-game) 1)]
+      (is (str/includes? html "Play Selected"))
+      (is (str/includes? html "your turn"))
+      (is (str/includes? html "Draw Card"))))
+
+  (testing "waiting renders poll endpoint and waiting label"
+    (let [html (render-state (live-game) 2)]
+      (is (str/includes? html "/games/TEST/state"))
+      (is (str/includes? html "Waiting for"))))
+
+  (testing "penalty renders block and accept actions"
+    (let [html (render-state (-> (live-game)
+                                 (update :effects conj {:type :penalty :penalty-type :two})) 1)]
+      (is (str/includes? html "Select a Card to Block"))
+      (is (str/includes? html "Accept — Draw 2"))
+      (is (str/includes? html "Penalty active"))))
+
+  (testing "cardless, answer and select-suit render their actions"
+    (let [base (live-game)]
+      (is (str/includes? (render-state (game/update-player base 1 #(assoc % :status :cardless)) 1)
+                         "CARDLESS"))
+      (is (str/includes? (render-state (update base :effects conj {:type :awaiting-answer}) 1)
+                         "Draw to Answer"))
+      (is (str/includes? (render-state (update base :effects conj {:type :select-suit}) 1)
+                         "Select a suit:"))))
+
+  (testing "finished game renders winner banner"
+    (let [html (render-state (-> (live-game)
+                                 (assoc :status :finished :winner 1)) 1)]
+      (is (str/includes? html "Game Finished!"))
+      (is (str/includes? html "Winner: ")))))
