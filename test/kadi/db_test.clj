@@ -1,9 +1,11 @@
 (ns kadi.db-test
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
+            [clojure.string :as str]
             [kadi.db :as db]
             [kadi.game :as game]
             [kadi.schema :as schema]
-            [next.jdbc :as jdbc]))
+            [next.jdbc :as jdbc]
+            [next.jdbc.result-set :as rs]))
 
 ;; Use a test database file that gets cleaned up
 (def test-db-file "test-kadi.db")
@@ -17,6 +19,9 @@
 (db/init!)
 
 (defn with-test-db [f]
+  ;; Re-assert our DB: alter-var-root at load time loses to whichever
+  ;; test namespace loads last, so bind per-test instead of per-load.
+  (alter-var-root #'db/*db-spec* (constantly {:dbtype "sqlite" :dbname test-db-file}))
   ;; Delete test db if it exists
   (let [file (java.io.File. test-db-file)]
     (when (.exists file)
@@ -312,3 +317,29 @@
         (is (every? #(string? (:rank %)) all-cards) "All ranks should remain strings after normalization")
         (is (every? #(keyword? (:suit %)) all-cards) "All suits should remain keywords after normalization")))))
 
+
+(deftest get-player-by-username-test
+  (testing "finds player case-insensitively"
+    (let [created (db/create-player! {:name "alice" :email "a@test.com"})]
+      (is (= (:id created) (:id (db/get-player-by-username "alice"))))
+      (is (= (:id created) (:id (db/get-player-by-username "ALICE"))))
+      (is (nil? (db/get-player-by-username "nobody"))))))
+
+(deftest username-uniqueness-test
+  (testing "player names are unique case-insensitively"
+    (db/create-player! {:name "alice" :email "a@test.com"})
+    (is (thrown? Exception
+                 (db/create-player! {:name "ALICE" :email "b@test.com"}))
+        "Duplicate username with different case should violate unique index")))
+
+(deftest username-migration-test
+  (testing "init! dedups legacy duplicate names before creating the index"
+    (jdbc/execute! (db/datasource) ["DROP INDEX IF EXISTS idx_players_name_unique"])
+    (db/create-player! {:name "Alice" :email "a@test.com"})
+    (db/create-player! {:name "ALICE" :email "b@test.com"})
+    (db/init!)
+    (let [rows (jdbc/execute! (db/datasource) ["SELECT name FROM players"]
+                              {:builder-fn rs/as-unqualified-lower-maps})]
+      (is (= 2 (count rows)))
+      (is (= 2 (count (set (map #(str/lower-case (:name %)) rows))))
+          "Names should be unique case-insensitively after migration"))))
