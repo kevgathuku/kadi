@@ -387,6 +387,9 @@
   (let [res (join-player state player)]
     (if (:ok res) (:ok res) res)))
 
+;; Forward declaration: *-cmd fns delegate to the apply-action methods below.
+(declare apply-action)
+
 (defn validate-start [state]
   (cond
     (not= :lobby (game-status state)) {:error "Game is not in lobby"}
@@ -424,8 +427,7 @@
                  (advance-turn)
                  (update-in [:meta :updated-at] (constantly (java.time.Instant/now))))}))))
 
-(defn validate-play-cards [state player-id cards]
-  (cond
+(defn validate-play-cards [state player-id cards]  (cond
     (not= :live (game-status state)) {:error "Game is not live"}
     (not (get-player state player-id)) {:error "Player not in game"}
     (not= player-id (current-player-id state)) {:error "Not your turn"}
@@ -433,33 +435,15 @@
     :else (validation/validate-play (with-embedded-hands state) player-id cards)))
 
 (defn play-cards-cmd [state player-id cards & {:keys [declare-kadi?] :or {declare-kadi? false}}]
-  (let [v (validate-play-cards state player-id cards)
-        ;; Capture the top card BEFORE adding new cards to played stack
-        prev-top-card (last (get-in state [:zones :played-stack]))]
+  (let [v (validate-play-cards state player-id cards)]
     (if (:error v)
       v
       (if (:valid? v)
-        {:ok (-> state
-                 ;; Step 1: Set player to :kadi if declaring
-                 (cond-> declare-kadi? (update-player player-id #(assoc % :status :kadi)))
-                 ;; Step 2: Play cards normally
-                 (update :effects #(remove (fn [e] (= :suit-selected (:type e))) %))
-                 (remove-cards-from-hand player-id cards)
-                 (add-to-played-stack cards)
-                 (apply-card-effects cards prev-top-card)
-                 ;; Step 3: Check cardless (may set to :cardless if invalid finish)
-                 (check-cardless player-id cards)
-                 ;; Step 4: Check for win (if still in :kadi and hand empty)
-                 (as-> s
-                   (let [player (get-player s player-id)
-                         hand (get-hand s player-id)]
-                     (if (and (= :kadi (:status player)) (empty? hand))
-                       (-> s
-                           (assoc :status :finished)
-                           (assoc :winner player-id))
-                       s)))
-                 (maybe-advance-turn cards)
-                 (update-in [:meta :updated-at] (constantly (java.time.Instant/now))))}
+        {:ok (apply-action state {:type :play-cards
+                                  :player-id player-id
+                                  :cards cards
+                                  :declare-kadi? declare-kadi?
+                                  :timestamp (java.time.Instant/now)})}
         {:error (:reason v)}))))
 
 (defn validate-select-suit [state suit]

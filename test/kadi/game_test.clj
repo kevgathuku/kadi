@@ -1272,3 +1272,79 @@
           result (game/draw-card-cmd game 1)]
       (is (:error result) "Cardless player should not be able to draw when penalty is active")
       (is (= "Must accept penalty first" (:error result))))))
+
+;; =============================================================================
+;; Write-path parity (candidate 1 pilot)
+;; =============================================================================
+
+(deftest play-cards-cmd-apply-parity-test
+  (testing "cmd and apply-action produce identical states for identical input"
+    (let [card {:suit :hearts :rank "5"}
+          state (-> (make-test-game)
+                    (clear-hand 1)
+                    (give-card 1 card)
+                    (set-top-card {:suit :hearts :rank "9"}))
+          via-cmd (:ok (game/play-cards-cmd state 1 [card]))
+          via-apply (game/apply-action state {:type :play-cards
+                                              :player-id 1
+                                              :cards [card]
+                                              :declare-kadi? false
+                                              :timestamp (java.time.Instant/parse "2026-01-01T00:00:00Z")})]
+      (is (some? via-cmd) "cmd should succeed")
+      (is (= (dissoc via-apply :meta) (dissoc via-cmd :meta))
+          "states should match apart from :meta/updated-at timestamps"))))
+
+(deftest normalize-cards-idempotent-test
+  (testing "normalize-cards is a no-op on handler-parsed cards"
+    (let [parsed (cards/id->card "5-hearts")]
+      (is (= {:suit :hearts :rank "5"} parsed))
+      (is (= [parsed] (vec (schema/normalize-cards [parsed])))))))
+
+(deftest all-actions-cmd-apply-parity-test
+  (testing "every cmd delegates to its apply-action method: identical states"
+    (let [ts (java.time.Instant/parse "2026-01-01T00:00:00Z")
+          no-meta #(dissoc % :meta)]
+      (testing "draw-card"
+        (let [state (make-test-game)
+              via-cmd (:ok (game/draw-card-cmd state 1))
+              via-apply (game/apply-action state {:type :draw-card :player-id 1
+                                                  :maintain-kadi? false :timestamp ts})]
+          (is (some? via-cmd))
+          (is (= (no-meta via-apply) (no-meta via-cmd)))))
+      (testing "select-suit"
+        (let [state (-> (make-test-game)
+                        (update :effects conj {:type :select-suit}))
+              via-cmd (:ok (game/select-suit-cmd state :hearts))
+              via-apply (game/apply-action state {:type :select-suit :suit :hearts
+                                                  :timestamp ts})]
+          (is (some? via-cmd))
+          (is (= (no-meta via-apply) (no-meta via-cmd)))))
+      (testing "accept-penalty"
+        (let [state (-> (make-test-game)
+                        (update :effects conj {:type :penalty :penalty-type :two}))
+              via-cmd (:ok (game/accept-penalty-cmd state 1))
+              via-apply (game/apply-action state {:type :accept-penalty :player-id 1
+                                                  :timestamp ts})]
+          (is (some? via-cmd))
+          (is (= (no-meta via-apply) (no-meta via-cmd)))))
+      (testing "answer-question"
+        (let [state (-> (make-test-game)
+                        (update :effects conj {:type :awaiting-answer}))
+              via-cmd (:ok (game/answer-question-cmd state 1))
+              via-apply (game/apply-action state {:type :answer-question :player-id 1
+                                                  :timestamp ts})]
+          (is (some? via-cmd))
+          (is (= (no-meta via-apply) (no-meta via-cmd)))))
+      (testing "play-cards while kadi declared still matches"
+        (let [card {:suit :hearts :rank "5"}
+              state (-> (make-test-game)
+                        (clear-hand 1)
+                        (give-card 1 card)
+                        (set-top-card {:suit :hearts :rank "9"})
+                        (game/update-player 1 #(assoc % :status :kadi)))
+              via-cmd (:ok (game/play-cards-cmd state 1 [card]))
+              via-apply (game/apply-action state {:type :play-cards :player-id 1
+                                                  :cards [card] :declare-kadi? false
+                                                  :timestamp ts})]
+          (is (some? via-cmd))
+          (is (= (no-meta via-apply) (no-meta via-cmd))))))))
