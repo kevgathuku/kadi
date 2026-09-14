@@ -476,6 +476,7 @@
   (cond
     (not= :live (game-status state)) {:error "Game is not live"}
     (not (get-player state player-id)) {:error "Player not in game"}
+    (not= player-id (current-player-id state)) {:error "Not your turn"}
     (not (has-effect? state :penalty)) {:error "No penalty in progress"}
     :else {:ok true}))
 

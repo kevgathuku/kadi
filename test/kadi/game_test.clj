@@ -1348,3 +1348,88 @@
                                                   :timestamp ts})]
           (is (some? via-cmd))
           (is (= (no-meta via-apply) (no-meta via-cmd))))))))
+
+(deftest migrated-cmd-error-branches-test
+  (testing "draw-card during penalty must accept first"
+    (let [game (-> (make-test-game)
+                   (update :effects conj {:type :penalty :penalty-type :two}))
+          result (game/draw-card-cmd game (game/current-player-id game))]
+      (is (:error result))
+      (is (= "Must accept penalty first" (:error result)))))
+
+  (testing "draw-card when game not live"
+    (let [game (-> (game/new-game "TEST")
+                   (game/add-player {:id 1 :name "Alice"})
+                   (game/add-player {:id 2 :name "Bob"}))]
+      (is (:error (game/draw-card-cmd game 1)))))
+
+  (testing "play-cards rejects unknown player and empty play"
+    (let [game (make-test-game)
+          card {:suit :hearts :rank "5"}
+          game (give-card game 1 card)]
+      (is (:error (game/play-cards-cmd game 99 [card]))
+          "Player not in game")
+      (is (:error (game/play-cards-cmd game 1 []))
+          "Must play at least one card")))
+
+  (testing "answer-question rejects wrong turn"
+    (let [game (-> (make-test-game)
+                   (update :effects conj {:type :awaiting-answer}))
+          other-id (:id (second (:players game)))]
+      (is (:error (game/answer-question-cmd game other-id)))))
+
+  (testing "accept-penalty when game not live"
+    (let [game (-> (make-test-game)
+                   (assoc :status :finished)
+                   (update :effects conj {:type :penalty :penalty-type :two}))]
+      (is (:error (game/accept-penalty-cmd game (game/current-player-id game))))))
+
+  (testing "select-suit accepts string suit via delegated normalization"
+    (let [game (-> (make-test-game)
+                   (update :effects conj {:type :select-suit}))
+          result (game/select-suit-cmd game "hearts")]
+      (is (:ok result) "String suit should normalize through the delegated path")
+      (is (game/has-effect? (:ok result) :suit-selected)))))
+
+(deftest accept-penalty-turn-test
+  (testing "only the penalized (current) player can accept, 3-player game"
+    (let [game (-> (make-3p-test-game)
+                   (clear-hand 1)
+                   (give-card 1 {:suit :hearts :rank "2"})
+                   (set-top-card {:suit :hearts :rank "9"}))
+          played (:ok (game/play-cards-cmd game 1 [{:suit :hearts :rank "2"}]))
+          _ (assert played "setup play should succeed")
+          penalized (game/current-player-id played)
+          hand-before (count (game/get-hand played penalized))]
+      (is (= 2 penalized) "Player 2 is penalized after player 1 plays a 2")
+      (is (:error (game/accept-penalty-cmd played 3))
+          "Player 3 (not current) must be rejected")
+      (let [result (:ok (game/accept-penalty-cmd played penalized))]
+        (is (some? result) "Penalized player accepts")
+        (is (= (+ hand-before 2) (count (game/get-hand result penalized)))
+            "Penalized player draws 2")
+        (is (not (game/has-effect? result :penalty)) "Penalty cleared")
+        (is (= 3 (game/current-player-id result)) "Turn advances to player 3")))))
+
+(deftest accept-penalty-direction-test
+  (testing "penalty follows turn direction, counter-clockwise leg"
+    (let [game (-> (make-3p-test-game)
+                   (game/reverse-direction)
+                   (clear-hand 1)
+                   (give-card 1 {:suit :hearts :rank "2"})
+                   (set-top-card {:suit :hearts :rank "9"}))
+          played (:ok (game/play-cards-cmd game 1 [{:suit :hearts :rank "2"}]))
+          _ (assert played "setup play should succeed")
+          penalized (game/current-player-id played)
+          hand-before (count (game/get-hand played penalized))]
+      (is (= :counter-clockwise (:direction played)))
+      (is (= 3 penalized) "Counter-clockwise from player 1 penalizes player 3")
+      (is (:error (game/accept-penalty-cmd played 2))
+          "Player 2 (not current) must be rejected")
+      (let [result (:ok (game/accept-penalty-cmd played penalized))]
+        (is (some? result) "Penalized player accepts")
+        (is (= (+ hand-before 2) (count (game/get-hand result penalized)))
+            "Penalized player draws 2")
+        (is (not (game/has-effect? result :penalty)) "Penalty cleared")
+        (is (= 2 (game/current-player-id result))
+            "Turn advances counter-clockwise to player 2")))))
