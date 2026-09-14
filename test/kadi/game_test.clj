@@ -1058,6 +1058,108 @@
       (is (= :finished (:status final-state)) "Game should be finished")
       (is (= 1 (:winner final-state)) "Player 1 should be the winner")))
 
+  (testing "valid Q + regular answer finish with Kadi declaration"
+    (let [game (-> (make-test-game)
+                   (clear-hand 1)
+                   (give-card 1 {:suit :hearts :rank "Q"})
+                   (give-card 1 {:suit :hearts :rank "5"})
+                   (set-top-card {:suit :hearts :rank "7"}))
+          result (game/play-cards-cmd game 1 [{:suit :hearts :rank "Q"}
+                                              {:suit :hearts :rank "5"}]
+                                      :declare-kadi? true)
+          final-state (:ok result)]
+      (is (not (:error result)) "Q + answer play should succeed")
+      (is (= :finished (:status final-state)) "Game should be finished on answered Q")
+      (is (= 1 (:winner final-state)) "Player 1 should be the winner")
+      (is (empty? (game/get-hand final-state 1)) "Hand should be empty")))
+
+  (testing "valid 8 + regular answer finish with Kadi declaration"
+    (let [game (-> (make-test-game)
+                   (clear-hand 1)
+                   (give-card 1 {:suit :hearts :rank "8"})
+                   (give-card 1 {:suit :hearts :rank "5"})
+                   (set-top-card {:suit :hearts :rank "7"}))
+          result (game/play-cards-cmd game 1 [{:suit :hearts :rank "8"}
+                                              {:suit :hearts :rank "5"}]
+                                      :declare-kadi? true)
+          final-state (:ok result)]
+      (is (not (:error result)) "8 + answer play should succeed")
+      (is (= :finished (:status final-state)) "Game should be finished on answered 8")
+      (is (= 1 (:winner final-state)) "Player 1 should be the winner")))
+
+  (testing "valid Q + 8 + regular answer finish with Kadi declaration"
+    (let [game (-> (make-test-game)
+                   (clear-hand 1)
+                   (give-card 1 {:suit :hearts :rank "Q"})
+                   (give-card 1 {:suit :hearts :rank "8"})
+                   (give-card 1 {:suit :hearts :rank "5"})
+                   (set-top-card {:suit :hearts :rank "7"}))
+          result (game/play-cards-cmd game 1 [{:suit :hearts :rank "Q"}
+                                              {:suit :hearts :rank "8"}
+                                              {:suit :hearts :rank "5"}]
+                                      :declare-kadi? true)
+          final-state (:ok result)]
+      (is (not (:error result)) "Q + 8 + answer play should succeed")
+      (is (= :finished (:status final-state)) "Game should be finished")
+      (is (= 1 (:winner final-state)) "Player 1 should be the winner")))
+
+  (testing "invalid finish with Q alone (unanswered) becomes cardless"
+    (let [game (-> (make-test-game)
+                   (clear-hand 1)
+                   (give-card 1 {:suit :hearts :rank "Q"})
+                   (set-top-card {:suit :hearts :rank "7"}))
+          result (game/play-cards-cmd game 1 [{:suit :hearts :rank "Q"}] :declare-kadi? true)
+          final-state (:ok result)
+          player (game/get-player final-state 1)]
+      (is (not (:error result)) "Unanswered Q play should succeed")
+      (is (= :cardless (:status player)) "Player should become cardless, not win")
+      (is (not= :finished (:status final-state)) "Game should not be finished")
+      (is (game/has-effect? final-state :awaiting-answer) "Question effect still active")))
+
+  (testing "invalid finish with 8 alone (unanswered) becomes cardless"
+    (let [game (-> (make-test-game)
+                   (clear-hand 1)
+                   (give-card 1 {:suit :hearts :rank "8"})
+                   (set-top-card {:suit :hearts :rank "7"}))
+          result (game/play-cards-cmd game 1 [{:suit :hearts :rank "8"}] :declare-kadi? true)
+          final-state (:ok result)
+          player (game/get-player final-state 1)]
+      (is (not (:error result)) "Unanswered 8 play should succeed")
+      (is (= :cardless (:status player)) "Player should become cardless, not win")
+      (is (not= :finished (:status final-state)) "Game should not be finished")))
+
+  (testing "invalid finish with Q + action card answer (2 penalty) becomes cardless"
+    (let [game (-> (make-test-game)
+                   (clear-hand 1)
+                   (give-card 1 {:suit :hearts :rank "Q"})
+                   (give-card 1 {:suit :hearts :rank "2"})
+                   (set-top-card {:suit :hearts :rank "7"}))
+          result (game/play-cards-cmd game 1 [{:suit :hearts :rank "Q"}
+                                              {:suit :hearts :rank "2"}]
+                                      :declare-kadi? true)
+          final-state (:ok result)
+          player (game/get-player final-state 1)]
+      (is (not (:error result)) "Q + 2 play should succeed")
+      (is (= :cardless (:status player)) "Ending on a 2 triggers cardless")
+      (is (not= :finished (:status final-state)) "Game should not be finished")
+      (is (game/has-effect? final-state :penalty) "Penalty effect created on next player")))
+
+  (testing "invalid finish with Q + King answer becomes cardless"
+    (let [game (-> (make-test-game)
+                   (clear-hand 1)
+                   (give-card 1 {:suit :hearts :rank "Q"})
+                   (give-card 1 {:suit :hearts :rank "K"})
+                   (set-top-card {:suit :hearts :rank "7"}))
+          result (game/play-cards-cmd game 1 [{:suit :hearts :rank "Q"}
+                                              {:suit :hearts :rank "K"}]
+                                      :declare-kadi? true)
+          final-state (:ok result)
+          player (game/get-player final-state 1)]
+      (is (not (:error result)) "Q + K play should succeed")
+      (is (= :cardless (:status player)) "Ending on a King triggers cardless")
+      (is (not= :finished (:status final-state)) "Game should not be finished")
+      (is (= :counter-clockwise (:direction final-state)) "Direction reversed")))
+
   (testing "invalid finish with King as last card becomes cardless"
     (let [game (-> (make-test-game)
                    (clear-hand 1)
