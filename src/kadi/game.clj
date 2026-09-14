@@ -366,6 +366,103 @@
 (defn get-effect [state effect-type]
   (first (filter #(= effect-type (:type %)) (:effects state))))
 
+;; =============================================================================
+;; View Model (single interpreter of game state for rendering)
+;; =============================================================================
+
+(defn- banner-for
+  "Build the effect banner data. Mirrors effect precedence: penalty,
+   suit selection, required suit, awaiting answer."
+  [state my-turn? current-name]
+  (let [penalty (get-effect state :penalty)
+        select-suit (get-effect state :select-suit)
+        suit-selected (get-effect state :suit-selected)
+        awaiting-answer (get-effect state :awaiting-answer)]
+    (cond
+      penalty
+      (let [penalty-type (name (:penalty-type penalty))
+            draw-count (case (:penalty-type penalty) :two 2 :three 3 0)]
+        {:kind :penalty
+         :draw-count draw-count
+         :text (if my-turn?
+                 (str "⚠️ Penalty active (" draw-count " cards)! Play " penalty-type " to block, or accept.")
+                 (str "⚠️ Penalty active (" draw-count " cards). Waiting for " current-name "."))})
+
+      select-suit
+      {:kind :select-suit
+       :text (if my-turn?
+               "Ace played! Select a suit below."
+               (str "Waiting for " current-name " to select a suit."))}
+
+      suit-selected
+      ;; Text is composed in views: the suit glyph is presentation.
+      {:kind :suit-selected
+       :suit (:suit suit-selected)
+       :text nil}
+
+      awaiting-answer
+      {:kind :awaiting-answer
+       :text (if my-turn?
+               "Question asked! You must draw to answer."
+               (str "Question asked! Waiting for " current-name " to draw."))}
+
+      :else {:kind :none :text nil})))
+
+(defn play-view
+  "Derive everything the play screen needs from game state.
+   The single interpreter: views render this map without branching
+   on effect types or player statuses."
+  [state player-id]
+  (let [players (:players state)
+        current-idx (current-player-index state)
+        current (get players current-idx)
+        current-name (:name current)
+        my-player (first (filter #(= (:id %) player-id) players))
+        my-turn? (= player-id (:id current))
+        finished? (= :finished (:status state))
+        winner (when finished?
+                 (first (filter #(= (:id %) (:winner state)) players)))
+        penalty (get-effect state :penalty)
+        mode (cond
+               finished? :finished
+               (nil? my-player) :spectator
+               (not my-turn?) :waiting
+               (= :cardless (:status my-player)) :cardless
+               (has-effect? state :awaiting-answer) :answer
+               (has-effect? state :select-suit) :select-suit
+               :else :play)]
+    {:my-turn? my-turn?
+     :finished? finished?
+     :winner-name (:name winner)
+     :current-name current-name
+     :top-card (last (get-in state [:zones :played-stack]))
+     :deck-count (count (get-in state [:zones :deck]))
+     :direction (:direction state)
+     :banner (banner-for state my-turn? current-name)
+     :penalty? (some? penalty)
+     :penalty-draw-count (when penalty
+                           (case (:penalty-type penalty) :two 2 :three 3 0))
+     :players (mapv (fn [[idx p]]
+                      (let [current? (= idx current-idx)
+                            me? (= (:id p) player-id)
+                            kadi? (= :kadi (:status p))
+                            hand-count (count (get-hand state (:id p)))]
+                        {:id (:id p)
+                         :name (:name p)
+                         :hand-count hand-count
+                         :current? current?
+                         :me? me?
+                         :kadi? kadi?
+                         :status-text (cond
+                                        (and current? me?) "your turn"
+                                        kadi? "Kadi"
+                                        :else (str hand-count " cards"))}))
+                    (map-indexed vector players))
+     :my-hand (or (when player-id (get-hand state player-id)) [])
+     :my-status (:status my-player)
+     :mode mode
+     :poll? (and (not my-turn?) (not finished?))}))
+
 (defn- validate-join [state {:keys [id name]}]
   (cond
     (not= :lobby (game-status state)) {:error "Game is not in lobby"}

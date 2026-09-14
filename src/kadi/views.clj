@@ -333,39 +333,16 @@
   (str (:rank card) (suit-symbol (:suit card))))
 
 (defn- effect-banner
-  "Render a banner for active game effects."
-  [state {:keys [is-my-turn? current-player-name]}]
-  (let [effects (:effects state)
-        penalty (first (filter #(= :penalty (:type %)) effects))
-        select-suit (first (filter #(= :select-suit (:type %)) effects))
-        suit-selected (first (filter #(= :suit-selected (:type %)) effects))
-        awaiting-answer (first (filter #(= :awaiting-answer (:type %)) effects))]
-    (cond
-      penalty
-      (let [penalty-type (name (:penalty-type penalty))
-            count (case (:penalty-type penalty) :two 2 :three 3 0)]
-        [:div.effect-banner.penalty
-         (if is-my-turn?
-           (str "⚠️ Penalty active (" count " cards)! Play " penalty-type " to block, or accept.")
-           (str "⚠️ Penalty active (" count " cards). Waiting for " current-player-name "."))])
-
-      select-suit
-      [:div.effect-banner.select-suit
-       (if is-my-turn?
-         "Ace played! Select a suit below."
-         (str "Waiting for " current-player-name " to select a suit."))]
-
-      suit-selected
-      (let [required-suit (:suit suit-selected)
-            suit-display (str (suit-symbol required-suit) " " (clojure.string/capitalize (name required-suit)))]
+  "Render the banner from view-model data. The text is derived in
+   game/play-view; only the suit glyph is composed here."
+  [{:keys [kind text suit]}]
+  (when (not= :none kind)
+    (if (= :suit-selected kind)
+      (let [suit-display (str (suit-symbol suit) " " (clojure.string/capitalize (name suit)))]
         [:div.effect-banner.suit-selected
          (str "🎴 Required suit: " suit-display)])
-
-      awaiting-answer
-      [:div.effect-banner.awaiting-answer
-       (if is-my-turn?
-         "Question asked! You must draw to answer."
-         (str "Question asked! Waiting for " current-player-name " to draw."))])))
+      [:div.effect-banner {:class (name kind)}
+       text])))
 
 (defn- suit-picker
   "Render suit selection buttons."
@@ -389,136 +366,112 @@
 
 (defn game-play-content
   "Game play content fragment - used for initial render and HTMX polling updates.
-   Returns HTML string with HTMX attributes for auto-refresh when not player's turn."
+   Returns HTML string with HTMX attributes for auto-refresh when not player's turn.
+   Renders the game/play-view view-model; no game-logic branching here."
   [{:keys [player game]}]
-  (let [state (:state game)
-        current-player-idx (game/current-player-index state)
-        players (:players state)
-        current-player (get players current-player-idx)
-        my-player (first (filter #(= (:id player) (:id %)) players))
-        my-hand (when player (game/get-hand state (:id player)))
-        is-my-turn? (= (:id player) (:id current-player))
-        top-card (last (get-in state [:zones :played-stack]))
-        deck-count (count (get-in state [:zones :deck]))
-        direction (:direction state)
-        has-select-suit? (game/has-effect? state :select-suit)
-        has-penalty? (game/has-effect? state :penalty)
-        has-awaiting-answer? (game/has-effect? state :awaiting-answer)
-        penalty-effect (game/get-effect state :penalty)
-        penalty-draw-count (when penalty-effect
-                             (case (:penalty-type penalty-effect) :two 2 :three 3 0))
-        game-finished? (= :finished (:status state))
-        ;; Only poll when it's NOT my turn and game is NOT finished
-        should-poll? (and (not is-my-turn?) (not game-finished?))]
+  (let [vm (game/play-view (:state game) (:id player))
+        short-code (:short_code game)
+        my-turn? (:my-turn? vm)
+        finished? (:finished? vm)
+        mode (:mode vm)]
     (str
      (h/html
       [:div {:id "game-content"
              :class (str "game-content"
-                         (when (and is-my-turn? (not game-finished?)) " is-active-turn")
-                         (when (and (not is-my-turn?) (not game-finished?)) " is-waiting"))
-             :hx-get (when should-poll? (str "/games/" (:short_code game) "/state"))
-             :hx-trigger (when should-poll? "every 2s")
+                         (when (and my-turn? (not finished?)) " is-active-turn")
+                         (when (and (not my-turn?) (not finished?)) " is-waiting"))
+             :hx-get (when (:poll? vm) (str "/games/" short-code "/state"))
+             :hx-trigger (when (:poll? vm) "every 2s")
              :hx-swap "outerHTML"}
        ;; Game finished banner
-       (when game-finished?
-         (let [winner-player (first (filter #(= (:id %) (:winner state)) players))]
-           [:div.game-finished-banner
-            [:h2 "🎉 Game Finished! 🎉"]
-            [:p "Winner: " (:name winner-player)]
-            [:a.btn {:href "/games"} "Back to Games"]]))
+       (when finished?
+         [:div.game-finished-banner
+          [:h2 "🎉 Game Finished! 🎉"]
+          [:p "Winner: " (:winner-name vm)]
+          [:a.btn {:href "/games"} "Back to Games"]])
        [:div.game-state-zone
-        [:div.game-code-chip (:short_code game)]
-        (effect-banner state {:is-my-turn? is-my-turn?
-                              :current-player-name (:name current-player)})
-        (when top-card
+        [:div.game-code-chip short-code]
+        (effect-banner (:banner vm))
+        (when-let [top-card (:top-card vm)]
           [:div.hero-card-area
            [:div {:class (str "top-card " (name (:suit top-card)))}
             (card-display top-card)]])
         [:p.game-meta
-         (str deck-count " cards in deck")
-         (when direction
+         (str (:deck-count vm) " cards in deck")
+         (when-let [direction (:direction vm)]
            (str " • " (clojure.string/capitalize (name direction))))]]
 
        [:div.scoreboard
-        (for [[idx p] (map-indexed vector players)]
-          (let [is-current (= idx current-player-idx)
-                is-kadi (= :kadi (:status p))
-                is-me (= (:id p) (:id player))
-                hand-count (count (game/get-hand state (:id p)))]
-            [:div {:class (str "scoreboard__row"
-                               (when is-current " scoreboard__row--active")
-                               (when is-kadi " scoreboard__row--kadi"))}
-             [:span.scoreboard__name (:name p)]
-             [:span.scoreboard__cards
-              (for [_ (range hand-count)]
-                [:span.scoreboard__mini-card])]
-             [:span.scoreboard__status
-              (cond
-                (and is-current is-me) "your turn"
-                is-kadi "Kadi"
-                :else (str hand-count " cards"))]]))]
+        (for [p (:players vm)]
+          [:div {:class (str "scoreboard__row"
+                             (when (:current? p) " scoreboard__row--active")
+                             (when (:kadi? p) " scoreboard__row--kadi"))}
+           [:span.scoreboard__name (:name p)]
+           [:span.scoreboard__cards
+            (for [_ (range (:hand-count p))]
+              [:span.scoreboard__mini-card])]
+           [:span.scoreboard__status (:status-text p)]])]
 
-       (when my-player
+       (when (some? (:my-status vm))
          [:div.card {:id "my-hand"}
           [:h3 "Your Hand"]
-          (when (and (not is-my-turn?) (not game-finished?))
-            [:p.waiting-label (str "Waiting for " (:name current-player) "...")])
+          (when (and (not my-turn?) (not finished?))
+            [:p.waiting-label (str "Waiting for " (:current-name vm) "...")])
 
           (cond
             ;; Cardless: must draw, no hand to show
-            (= :cardless (:status my-player))
-            (when (and is-my-turn? (not game-finished?))
-              [:div.action-area
-               [:div.effect-banner.cardless-warning
-                [:p {:style "margin: 0; font-weight: bold;"}
-                 "⚠️ You are CARDLESS — you must draw a card first!"]]
-               [:div.action-buttons
-                [:form {:method "post" :action (str "/games/" (:short_code game) "/draw") :id "draw-form"
-                        :style "flex: 1;"}
-                 [:button.btn.btn-primary.btn-action {:type "submit"} "Draw Card"]]]])
+            (= :cardless mode)
+            [:div.action-area
+             [:div.effect-banner.cardless-warning
+              [:p {:style "margin: 0; font-weight: bold;"}
+               "⚠️ You are CARDLESS — you must draw a card first!"]]
+             [:div.action-buttons
+              [:form {:method "post" :action (str "/games/" short-code "/draw") :id "draw-form"
+                      :style "flex: 1;"}
+               [:button.btn.btn-primary.btn-action {:type "submit"} "Draw Card"]]]]
 
             ;; Awaiting answer: draw to answer
-            (and is-my-turn? has-awaiting-answer?)
+            (= :answer mode)
             (list
              [:div.hand
-              (for [card my-hand]
+              (for [card (:my-hand vm)]
                 [:div {:class (card-class card)}
                  (card-display card)])]
              [:div.action-area
               [:div.action-buttons
-               [:form {:method "post" :action (str "/games/" (:short_code game) "/answer-question")
+               [:form {:method "post" :action (str "/games/" short-code "/answer-question")
                        :style "flex: 1;"}
                 [:button.btn.btn-primary.btn-action {:type "submit"} "Draw to Answer"]]]])
 
             ;; Suit selection
-            (and is-my-turn? has-select-suit?)
+            (= :select-suit mode)
             (list
              [:div.hand
-              (for [card my-hand]
+              (for [card (:my-hand vm)]
                 [:div {:class (card-class card)}
                  (card-display card)])]
-             (suit-picker (:short_code game)))
+             (suit-picker short-code))
 
             ;; Normal play or penalty blocking
             :else
-            [:form {:method "post" :action (str "/games/" (:short_code game) "/play")
+            [:form {:method "post" :action (str "/games/" short-code "/play")
                     :id "play-form"}
              ;; Hidden input to track ordered card IDs
              [:input {:type "hidden" :name "ordered-cards" :id "ordered-cards" :value ""}]
              [:div.hand
-              (for [card my-hand]
+              (for [card (:my-hand vm)]
                 [:label
                  [:input {:type "checkbox" :name "cards" :value (cards/card->id card)
                           :style "display: none"
-                          :disabled (not is-my-turn?)
+                          :disabled (not my-turn?)
                           :data-card-id (cards/card->id card)
                           :class "card-checkbox"}]
                  [:div {:class (card-class card)}
                   (card-display card)]])]
 
              ;; Unified action area
-             (when (and is-my-turn? (not game-finished?))
-               (if has-penalty?
+             (when (and my-turn? (not finished?))
+               (if (:penalty? vm)
                  ;; Penalty: block + accept side-by-side
                  [:div.action-area
                   [:div.action-buttons
@@ -527,8 +480,8 @@
                     "Select a Card to Block"]
                    [:button.btn.btn-danger-outline.btn-action-accept
                     {:type "submit"
-                     :formaction (str "/games/" (:short_code game) "/accept-penalty")}
-                    (str "Accept — Draw " penalty-draw-count)]]
+                     :formaction (str "/games/" short-code "/accept-penalty")}
+                    (str "Accept — Draw " (:penalty-draw-count vm))]]
                   (kadi-toggle-inline)]
                  ;; Normal: play + draw side-by-side
                  [:div.action-area
@@ -538,7 +491,7 @@
                     "Play Selected"]
                    [:button.btn.btn-secondary.btn-action-accept
                     {:type "submit"
-                     :formaction (str "/games/" (:short_code game) "/draw")}
+                     :formaction (str "/games/" short-code "/draw")}
                     "Draw Card"]]
                   (kadi-toggle-inline)]))])])]))))
 

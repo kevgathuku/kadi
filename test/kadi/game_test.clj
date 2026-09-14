@@ -1433,3 +1433,66 @@
         (is (not (game/has-effect? result :penalty)) "Penalty cleared")
         (is (= 2 (game/current-player-id result))
             "Turn advances counter-clockwise to player 2")))))
+
+(deftest play-view-test
+  (testing "normal turn view-model"
+    (let [vm (game/play-view (make-test-game) 1)]
+      (is (true? (:my-turn? vm)))
+      (is (= :play (:mode vm)))
+      (is (= :none (get-in vm [:banner :kind])))
+      (is (false? (:penalty? vm)))
+      (is (false? (:poll? vm)))
+      (is (= "your turn" (:status-text (first (:players vm)))))))
+
+  (testing "waiting view-model polls"
+    (let [vm (game/play-view (make-test-game) 2)]
+      (is (false? (:my-turn? vm)))
+      (is (= :waiting (:mode vm)))
+      (is (true? (:poll? vm)))
+      (is (= "4 cards" (:status-text (second (:players vm)))))))
+
+  (testing "penalty banner"
+    (let [state (-> (make-test-game)
+                    (update :effects conj {:type :penalty :penalty-type :two}))
+          mine (game/play-view state 1)
+          theirs (game/play-view state 2)]
+      (is (= :penalty (get-in mine [:banner :kind])))
+      (is (= 2 (:penalty-draw-count mine)))
+      (is (true? (:penalty? mine)))
+      (is (clojure.string/includes? (get-in mine [:banner :text]) "Play two to block"))
+      (is (clojure.string/includes? (get-in theirs [:banner :text]) "Waiting for"))))
+
+  (testing "select-suit and suit-selected banners"
+    (let [selecting (-> (make-test-game)
+                        (update :effects conj {:type :select-suit}))
+          vm (game/play-view selecting 1)]
+      (is (= :select-suit (get-in vm [:banner :kind])))
+      (is (= :select-suit (:mode vm)))
+      (is (= "Ace played! Select a suit below." (get-in vm [:banner :text]))))
+    (let [selected (-> (make-test-game)
+                       (update :effects conj {:type :suit-selected :suit :hearts}))
+          vm (game/play-view selected 2)]
+      (is (= :suit-selected (get-in vm [:banner :kind])))
+      (is (= :hearts (get-in vm [:banner :suit])))))
+
+  (testing "awaiting-answer and cardless modes"
+    (let [vm (game/play-view (-> (make-test-game)
+                                  (update :effects conj {:type :awaiting-answer})) 1)]
+      (is (= :answer (:mode vm)))
+      (is (= :awaiting-answer (get-in vm [:banner :kind]))))
+    (let [vm (game/play-view (-> (make-test-game)
+                                  (game/update-player 1 #(assoc % :status :cardless))) 1)]
+      (is (= :cardless (:mode vm)))))
+
+  (testing "finished game names the winner"
+    (let [state (-> (make-test-game)
+                    (clear-hand 1)
+                    (give-card 1 {:suit :hearts :rank "5"})
+                    (set-top-card {:suit :hearts :rank "9"})
+                    (game/update-player 1 #(assoc % :status :kadi)))
+          played (:ok (game/play-cards-cmd state 1 [{:suit :hearts :rank "5"}]))
+          vm (game/play-view played 1)]
+      (is (= :finished (:mode vm)))
+      (is (true? (:finished? vm)))
+      (is (= "Alice" (:winner-name vm)))
+      (is (false? (:poll? vm))))))
