@@ -79,7 +79,29 @@
    CREATE INDEX IF NOT EXISTS idx_game_events_event_id ON game_events(event_id);
    CREATE INDEX IF NOT EXISTS idx_game_players_game_id ON game_players(game_id);
    CREATE INDEX IF NOT EXISTS idx_auth_tokens_token ON auth_tokens(token);
-   CREATE INDEX IF NOT EXISTS idx_auth_tokens_email ON auth_tokens(email);")
+   CREATE INDEX IF NOT EXISTS idx_auth_tokens_email ON auth_tokens(email);
+   CREATE UNIQUE INDEX IF NOT EXISTS idx_players_name_unique ON players(lower(name));")
+
+(defn- ensure-unique-player-names!
+  "Rename duplicate player names (case-insensitive) with a numeric suffix
+   so the unique index on lower(name) can be created on legacy DBs."
+  [ds]
+  (try
+    (let [rows (jdbc/execute! ds ["SELECT id, name FROM players"]
+                              {:builder-fn rs/as-unqualified-lower-maps})
+          seen (atom #{})]
+      (doseq [{:keys [id name]} (sort-by :id rows)]
+        (let [lower (clojure.string/lower-case (or name ""))]
+          (if (contains? @seen lower)
+            (loop [n 2]
+              (let [candidate (str name n)
+                    candidate-lower (clojure.string/lower-case candidate)]
+                (if (contains? @seen candidate-lower)
+                  (recur (inc n))
+                  (do (jdbc/execute-one! ds ["UPDATE players SET name = ? WHERE id = ?" candidate id])
+                      (swap! seen conj candidate-lower)))))
+            (swap! seen conj lower)))))
+    (catch Exception _ nil)))
 
 (defn init!
   "Initialize the database with schema and pragmas."
@@ -92,10 +114,18 @@
     ;; Enable foreign keys and WAL mode
     (jdbc/execute! ds ["PRAGMA foreign_keys=ON"])
     (jdbc/execute! ds ["PRAGMA journal_mode=WAL"])
-    ;; Create tables
-    (doseq [stmt (clojure.string/split schema #";")]
-      (when (not (clojure.string/blank? stmt))
-        (jdbc/execute! ds [(clojure.string/trim stmt)])))))
+    ;; Create tables first, dedup legacy names, then indexes
+    ;; (unique index on lower(name) fails on legacy duplicate names otherwise).
+    (let [stmts (->> (clojure.string/split schema #";")
+                     (map clojure.string/trim)
+                     (remove clojure.string/blank?))
+          {:keys [tables indexes]} (group-by #(if (re-find #"(?i)^CREATE\s+(UNIQUE\s+)?INDEX" %)
+                                                :indexes :tables) stmts)]
+      (doseq [stmt tables]
+        (jdbc/execute! ds [stmt]))
+      (ensure-unique-player-names! ds)
+      (doseq [stmt indexes]
+        (jdbc/execute! ds [stmt])))))
 
 ;; =============================================================================
 ;; Event Sourcing
@@ -284,6 +314,13 @@
   [email]
   (jdbc/execute-one! (datasource)
                      ["SELECT * FROM players WHERE email = ?" email]
+                     {:builder-fn rs/as-unqualified-lower-maps}))
+
+(defn get-player-by-username
+  "Get a player by username (players.name), case-insensitive."
+  [username]
+  (jdbc/execute-one! (datasource)
+                     ["SELECT * FROM players WHERE lower(name) = lower(?)" username]
                      {:builder-fn rs/as-unqualified-lower-maps}))
 
 ;; =============================================================================

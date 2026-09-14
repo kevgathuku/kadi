@@ -66,13 +66,15 @@
 
 (defn send-signin-link [request]
   (let [params (parse-form request)
-        email (some-> (get params "email") str/trim)]
-    (if (auth/valid-email? email)
+        identifier (some-> (or (get params "identifier") (get params "email")
+                               (get params :identifier) (get params :email))
+                           str/trim)]
+    (if-let [email (auth/resolve-identifier->email identifier)]
       (let [token (auth/create-signin-token! email)]
         (auth/send-signin-email! {:email email :token token})
         (html-response
          (views/check-email-page {:email email})))
-      (redirect "/auth/signin" {:type :error :message "Please enter a valid email address"}))))
+      (redirect "/auth/signin" {:type :error :message "Enter a valid email or username"}))))
 
 (defn verify-signin [request]
   (let [token (get-in request [:path-params :token])]

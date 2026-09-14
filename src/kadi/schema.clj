@@ -227,6 +227,10 @@
   "Email address validated by regex pattern."
   [:re #"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"])
 
+(def Username
+  "Username (players.name): 3-20 chars, letters/digits/underscore."
+  [:re #"^[a-zA-Z0-9_]{3,20}$"])
+
 (def AuthToken
   "Auth token record as returned by db/get-auth-token."
   [:map
