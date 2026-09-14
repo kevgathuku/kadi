@@ -42,6 +42,12 @@
       "sourceType": "github",
       "skillPath": "skills/mempalace-recall/SKILL.md",
       "computedHash": "dc60ca63a00629ea7bc906ff070ad7bacff5381a8badec73bffe4e5916a717eb"
+    },
+    "setup-matt-pocock-skills": {
+      "source": "mattpocock/skills",
+      "sourceType": "github",
+      "skillPath": "skills/engineering/setup-matt-pocock-skills/SKILL.md",
+      "computedHash": "552b0f48b9fe054aa93c5d432fefbd7bd9645e3f2d20b4e22432453a81800b21"
     }
   }
 }
