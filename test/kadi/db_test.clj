@@ -343,3 +343,59 @@
       (is (= 2 (count rows)))
       (is (= 2 (count (set (map #(str/lower-case (:name %)) rows))))
           "Names should be unique case-insensitively after migration"))))
+
+(deftest cache-equals-full-rebuild-test
+  (testing "games.state cache always equals a from-scratch event replay"
+    (let [ts (java.time.Instant/parse "2026-01-01T00:00:00Z")
+          p1 {:id 1 :name "alice"}
+          p2 {:id 2 :name "bob"}
+          {:keys [id short-code]} (db/create-game! {:player p1 :timestamp ts})
+          ;; :meta holds wall-clock Instants stamped by new-game at replay
+          ;; time, so it can never match across two replays; compare game
+          ;; content only. NOTE: :start-game shuffles with an unseeded
+          ;; shuffle, so dealt zones differ on every replay by design —
+          ;; compare those structurally (counts) instead of by value.
+          check (fn [label]
+                  (let [a (dissoc (schema/normalize-game (db/rebuild-state-from-events id)) :meta)
+                        b (dissoc (get-in (db/get-game-by-code short-code) [:state]) :meta)]
+                    (if (= :live (:status a))
+                      (do (is (= (dissoc a :zones) (dissoc b :zones))
+                              (str label ": non-zone state matches"))
+                          (is (= (update-vals (:zones a) count) (update-vals (:zones b) count))
+                              (str label ": zone counts match"))
+                          (is (= (count (get-in a [:zones :hands 1])) 4))
+                          (is (= (count (get-in a [:zones :hands 2])) 4)))
+                      (is (= a b) (str label ": cache matches full replay")))))]
+      (check "after-create") ; seq 0 -> full rebuild from scratch
+      (db/append-event! id "e-join" :join-game ts {:player p2 :timestamp ts})
+      (check "after-join") ; stale -> snapshot + incremental replay
+      (db/append-event! id "e-start" :start-game ts {:timestamp ts})
+      (check "after-start") ; stale again, now with hands dealt
+      (let [row (db/get-game-by-code short-code)]
+        (is (= 3 (:state_sequence row)) "cache tracks the last event")))))
+
+(deftest parallel-append-test
+  (testing "concurrent appends across and within games stay consistent"
+    (let [ts "2026-01-01T00:00:00Z"
+          games (doall (for [n (range 2)]
+                         (db/create-game! {:player {:id n :name (str "p" n)}
+                                           :timestamp ts})))
+          join! (fn [game-id k]
+                  (db/append-event! game-id (str (java.util.UUID/randomUUID))
+                                    :join-game ts
+                                    {:player {:id (+ 100 (* game-id 100) k)
+                                              :name (str "j" game-id "-" k)}
+                                     :timestamp ts}))
+          results (doall (map deref
+                               (for [g games
+                                     t (range 2)]
+                                 (future (doall (for [k (range 5)] (join! (:id g) (+ (* t 5) k))))))))]
+      (is (every? #(= 5 (count %)) results) "all appends succeed")
+      (doseq [[g res] (map vector games (partition 2 results))]
+        (let [seqs (sort (map :sequence_number (apply concat res)))
+              row (db/get-game-by-code (:short-code g))]
+          (is (= (range 2 12) seqs) "per-game sequences are gapless")
+          (is (= 11 (:state_sequence row)) "cache tracks the last event")
+          (is (= 11 (count (get-in row [:state :players]))))))
+      (is (= [11 11] (mapv #(count (get-in (db/get-game-by-code (:short-code %)) [:state :players])) games))
+          "both games hold creator + 10 joins"))))
