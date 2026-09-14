@@ -416,16 +416,10 @@
   (let [v (validate-draw state player-id)]
     (if (:error v)
       v
-      (let [;; Recycle played stack if deck is empty
-            state' (cond-> state
-                     (empty? (get-in state [:zones :deck]))
-                     recycle-played-stack)
-            ;; If still empty after recycle, skip player (no draw)
-            can-draw? (seq (get-in state' [:zones :deck]))]
-        {:ok (-> state'
-                 (cond-> can-draw? (draw-card player-id :maintain-kadi? maintain-kadi?))
-                 (advance-turn)
-                 (update-in [:meta :updated-at] (constantly (java.time.Instant/now))))}))))
+      {:ok (apply-action state {:type :draw-card
+                                :player-id player-id
+                                :maintain-kadi? maintain-kadi?
+                                :timestamp (java.time.Instant/now)})})))
 
 (defn validate-play-cards [state player-id cards]  (cond
     (not= :live (game-status state)) {:error "Game is not live"}
@@ -458,11 +452,9 @@
         v (validate-select-suit state normalized-suit)]
     (if (:error v)
       v
-      {:ok (-> state
-               (update :effects #(remove (fn [e] (= :select-suit (:type e))) %))
-               (update :effects conj {:type :suit-selected :suit normalized-suit})
-               (advance-turn)
-               (update-in [:meta :updated-at] (constantly (java.time.Instant/now))))})))
+      {:ok (apply-action state {:type :select-suit
+                                :suit suit
+                                :timestamp (java.time.Instant/now)})})))
 
 (defn validate-answer [state player-id]
   (cond
@@ -476,17 +468,9 @@
   (let [v (validate-answer state player-id)]
     (if (:error v)
       v
-      (let [;; Recycle played stack if deck is empty
-            state' (cond-> state
-                     (empty? (get-in state [:zones :deck]))
-                     recycle-played-stack)
-            ;; If still empty after recycle, skip player (no draw)
-            can-draw? (seq (get-in state' [:zones :deck]))]
-        {:ok (-> state'
-                 (cond-> can-draw? (draw-card player-id))
-                 (update :effects #(remove (fn [e] (= :awaiting-answer (:type e))) %))
-                 (advance-turn)
-                 (update-in [:meta :updated-at] (constantly (java.time.Instant/now))))}))))
+      {:ok (apply-action state {:type :answer-question
+                                :player-id player-id
+                                :timestamp (java.time.Instant/now)})})))
 
 (defn validate-accept-penalty [state player-id]
   (cond
@@ -499,9 +483,9 @@
   (let [v (validate-accept-penalty state player-id)]
     (if (:error v)
       v
-      {:ok (-> state
-               (accept-penalty player-id)
-               (update-in [:meta :updated-at] (constantly (java.time.Instant/now))))})))
+      {:ok (apply-action state {:type :accept-penalty
+                                :player-id player-id
+                                :timestamp (java.time.Instant/now)})})))
 
 ;; =============================================================================
 ;; Event Replay (apply-action assumes events are valid)
