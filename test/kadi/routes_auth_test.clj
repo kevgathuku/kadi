@@ -27,7 +27,9 @@
   (testing "authenticated access returns 200"
     (let [code "XYZ789"
           game (make-game-with-code code)
-          player (db/create-player! {:name "Alice" :email "alice@example.com"})
+          suffix (str (System/currentTimeMillis))
+          player (db/create-player! {:name (str "alice" (subs suffix (- (count suffix) 5)))
+                                      :email (str "alice" suffix "@example.com")})
           req {:request-method :get
                :path-params {:code code}
                :session {:player-id (:id player)}}

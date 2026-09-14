@@ -73,12 +73,42 @@
   [email]
   (first (str/split email #"@")))
 
+(defn valid-username?
+  "Check if a string is a valid username."
+  [username]
+  (boolean
+   (and (string? username)
+        (m/validate schema/Username username))))
+
+(defn- sanitize-username
+  "Coerce an arbitrary string into a valid username base."
+  [s]
+  (let [cleaned (-> (or s "")
+                    str/lower-case
+                    (str/replace #"[^a-z0-9_]+" "_")
+                    (str/replace #"^_+|_+$" ""))]
+    (cond
+      (>= (count cleaned) 3) (subs cleaned 0 (min 20 (count cleaned)))
+      (empty? cleaned) "player"
+      :else (str cleaned (apply str (repeat (- 3 (count cleaned)) "0"))))))
+
+(defn- ensure-unique-username
+  "Append a numeric suffix until the username is free (case-insensitive)."
+  [base]
+  (loop [candidate base n 2]
+    (if (db/get-player-by-username candidate)
+      (let [suffix (str n)
+            trimmed (subs candidate 0 (min (count candidate) (- 20 (count suffix))))]
+        (recur (str trimmed suffix) (inc n)))
+      candidate)))
+
 (defn- find-or-create-player!
   "Look up a player by email, creating one if none exists."
   [email]
   (or (db/get-player-by-email email)
-      (db/create-player! {:name (email->display-name email)
-                          :email email})))
+      (let [username (ensure-unique-username (sanitize-username (email->display-name email)))]
+        (db/create-player! {:name username
+                            :email email}))))
 
 (defn verify-token!
   "Verify a token and return the player if valid.
@@ -149,6 +179,16 @@
   (boolean
    (and (string? email)
         (m/validate schema/Email email))))
+
+(defn resolve-identifier->email
+  "Resolve a sign-in identifier (email or username) to an email address.
+   Returns nil when a username has no matching player."
+  [identifier]
+  (let [identifier (some-> identifier str/trim)]
+    (cond
+      (nil? identifier) nil
+      (valid-email? identifier) identifier
+      :else (:email (db/get-player-by-username identifier)))))
 
 ;; =============================================================================
 ;; Session Helpers
