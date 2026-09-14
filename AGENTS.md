@@ -269,3 +269,13 @@ The Elixir/Phoenix implementation is preserved at:
 # View old implementation
 git show v1.0-elixir:lib/kadi/games/play_validator.ex
 ```
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in GitHub Issues via `gh`. See `docs/agents/issue-tracker.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` + `docs/adr/` at the repo root (ADRs created lazily; none yet). See `docs/agents/domain.md`.
