@@ -116,17 +116,17 @@
 ;; =============================================================================
 
 (defn signin-page
-  "Sign-in page with email form."
+  "Sign-in page with email-or-username form."
   [{:keys [flash]}]
   (layout {:title "Sign In" :flash flash}
           [:div.card
            [:h2 "Sign in to Kadi"]
-           [:p "Enter your email and we'll send you a sign-in link."]
+           [:p "Enter your email or username and we'll send you a sign-in link."]
            [:form {:method "post" :action "/auth/send-link"}
             [:div.form-group
-             [:label {:for "email"} "Email"]
-             [:input {:type "email" :id "email" :name "email"
-                      :placeholder "you@example.com" :required true :autofocus true}]]
+             [:label {:for "identifier"} "Email or username"]
+             [:input {:type "text" :id "identifier" :name "identifier"
+                      :placeholder "you@example.com or alice" :required true :autofocus true}]]
             [:button.btn.btn-primary {:type "submit"} "Send sign-in link"]]]))
 
 (defn check-email-page

@@ -94,6 +94,30 @@
   (testing "preserves dots and plus tags"
     (is (= "user.name+tag" (#'auth/email->display-name "user.name+tag@domain.com")))))
 
+(deftest valid-username?-test
+  (testing "accepts valid usernames"
+    (is (true? (auth/valid-username? "alice")))
+    (is (true? (auth/valid-username? "bob2")))
+    (is (true? (auth/valid-username? "a_b_c"))))
+
+  (testing "rejects invalid usernames"
+    (is (false? (auth/valid-username? "ab")))
+    (is (false? (auth/valid-username? "user.name")))
+    (is (false? (auth/valid-username? "user name")))
+    (is (false? (auth/valid-username? nil)))))
+
+(deftest resolve-identifier->email-test
+  (testing "passes emails through"
+    (is (= "a@test.com" (auth/resolve-identifier->email "a@test.com"))))
+
+  (testing "resolves username to email"
+    (with-redefs [db/get-player-by-username (fn [_] {:id 1 :name "alice" :email "alice@test.com"})]
+      (is (= "alice@test.com" (auth/resolve-identifier->email "alice")))))
+
+  (testing "returns nil for unknown username"
+    (with-redefs [db/get-player-by-username (fn [_] nil)]
+      (is (nil? (auth/resolve-identifier->email "nobody"))))))
+
 (deftest signin-url-test
   (testing "generates URL with token"
     (let [url (#'auth/signin-url "abc123")]
@@ -124,12 +148,21 @@
   (testing "creates player when none exists"
     (let [created (atom nil)]
       (with-redefs [db/get-player-by-email (fn [_] nil)
+                    db/get-player-by-username (fn [_] nil)
                     db/create-player!      (fn [args] (reset! created args)
                                              {:id 99 :name "bob"})]
         (let [result (#'auth/find-or-create-player! "bob@test.com")]
           (is (= {:id 99 :name "bob"} result))
           (is (= "bob" (:name @created)))
-          (is (= "bob@test.com" (:email @created))))))))
+          (is (= "bob@test.com" (:email @created)))))))
+
+  (testing "dedups username on collision"
+    (let [created (atom nil)]
+      (with-redefs [db/get-player-by-email (fn [_] nil)
+                    db/get-player-by-username (fn [u] (when (= u "bob") {:id 1 :name "bob"}))
+                    db/create-player! (fn [args] (reset! created args) {:id 100})]
+        (#'auth/find-or-create-player! "bob@test.com")
+        (is (= "bob2" (:name @created)))))))
 
 (defn- future-timestamp
   "Return an ISO-8601 timestamp 1 hour from now."
@@ -164,6 +197,7 @@
                                                     :created_at "2024-01-01T00:00:00Z"})
                     db/mark-token-used!    (fn [_] nil)
                     db/get-player-by-email (fn [_] nil)
+                    db/get-player-by-username (fn [_] nil)
                     db/create-player!      (fn [args] (reset! created-player args)
                                              {:id 99 :name "new"})]
         (let [result (auth/verify-token! "new-token")]

@@ -182,7 +182,7 @@ Before merging:
 
 - **docs/CLOJURE_BOOTSTRAP_BRIEF.md**: Complete game spec
 - **README.md**: Quick start, API examples
-- **CLAUDE.md**: AI assistant guidelines
+- **AGENTS.md**: AI assistant guidelines
 - **Clojure**: https://clojure.org/reference/documentation
 
 **Trust these instructions** - validated against actual code. Only search if incomplete or encountering undocumented errors.
