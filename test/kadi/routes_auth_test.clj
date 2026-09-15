@@ -6,12 +6,32 @@
             [kadi.db :as db]
             [kadi.game :as game]))
 
-;; Ensure DB schema exists for tests
-(defn setup-db [f]
-  (db/init!)
-  (f))
+;; Isolated test database: never touch the dev/prod kadi.db, and start
+;; each test from an empty DB so fixed short-codes can't collide.
+(def test-db-file "test-routes-auth.db")
 
-(use-fixtures :once setup-db)
+;; SET THE DEFAULT DB TO TEST DB AT NAMESPACE LOAD TIME
+(alter-var-root #'db/*db-spec* (constantly {:dbtype "sqlite" :dbname test-db-file}))
+
+;; Initialize the test database schema
+(db/init!)
+
+(defn with-test-db [f]
+  ;; Re-assert our DB: alter-var-root at load time loses to whichever
+  ;; test namespace loads last, so bind per-test instead of per-load.
+  (alter-var-root #'db/*db-spec* (constantly {:dbtype "sqlite" :dbname test-db-file}))
+  (let [file (java.io.File. test-db-file)]
+    (when (.exists file)
+      (.delete file)))
+  (db/init!)
+  (try
+    (f)
+    (finally
+      (let [file (java.io.File. test-db-file)]
+        (when (.exists file)
+          (.delete file))))))
+
+(use-fixtures :each with-test-db)
 
 (defn make-game-with-code [code]
   (db/create-game! {:player {:id 1 :name "Creator"}
