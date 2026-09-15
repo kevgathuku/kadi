@@ -52,7 +52,7 @@
   :run {:main-opts ["-m" "kadi.core"]}
 
   :lint {:extra-deps {clj-kondo/clj-kondo {:mvn/version "2024.03.13"}}
-         :main-opts ["-m" "clj-kondo.main" "--lint" "src" "test" "dev"]}
+         :main-opts ["-m" "clj-kondo.main" "--lint" "src" "test"]}
 
   :repl {:main-opts ["-m" "nrepl.cmdline"
 

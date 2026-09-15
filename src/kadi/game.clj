@@ -211,12 +211,14 @@
 ;; =============================================================================
 
 (defn start-game
-  "Transition game from lobby to live, deal cards, set starting card."
-  [state {:keys [cards-per-player] :or {cards-per-player 4}}]
+  "Transition game from lobby to live, deal cards, set starting card.
+   Optional :deck / :starting-card make the deal deterministic —
+   event replay passes the deal stored in the :start-game event."
+  [state {:keys [cards-per-player deck starting-card] :or {cards-per-player 4}}]
   (if (< (count (:players state)) 2)
     state
-    (let [deck (cards/make-deck)
-          starting-card (cards/select-starting-card deck)
+    (let [deck (or deck (cards/make-deck))
+          starting-card (or starting-card (cards/select-starting-card deck))
           deck-without-start (vec (remove #{starting-card} deck))]
       (-> state
           (assoc :status :live)
@@ -281,13 +283,13 @@
       (assoc ::skip-count (inc jack-count))
 
       ;; Question without answer
-      (and (every? cards/question-card? cards)
-           (not (empty? cards)))
+      (and (seq cards)
+           (every? cards/question-card? cards))
       (update :effects conj {:type :awaiting-answer}))))
 
 (defn maybe-advance-turn
   "Advance turn unless waiting for suit selection or question answer."
-  [state cards]
+  [state _cards]
   (let [skip-count (or (::skip-count state) 1)]
     (cond
       ;; Waiting for suit selection
@@ -307,15 +309,16 @@
 (defn check-cardless
   "Check if player entered cardless state.
    Rules:
-   - Playing K/J/2/3/A/Q/8 as last card(s) → ALWAYS cardless (even if in :kadi)
-   - These cards all require follow-up actions (skip/penalty/suit-select/question)
-   - Playing regular cards (4-7, 9, 10) as last → no cardless (normal finish)
+   - Playing K/J/2/3/A/Q/8 as the final card → ALWAYS cardless (even if in :kadi)
+     (these cards leave unresolved follow-up actions like skip/penalty/suit-select/question)
+   - Playing combos ending in regular cards (4-7, 9, 10) — including Q/8 + regular answer —
+     leaves no pending action, so it does not trigger cardless (allows normal finish)
    - Kadi declaration is optional, not required"
   [state player-id cards]
-  (let [player (get-player state player-id)
-        hand (get-hand state player-id)
-        ;; Cards that trigger cardless: all special action cards
-        triggers-cardless? (some #(contains? #{"K" "J" "2" "3" "A" "Q" "8"} (:rank %)) cards)]
+  (let [hand (get-hand state player-id)
+        final-card (last cards)
+        ;; Cards that trigger cardless: when the final card remaining on top is a special action card
+        triggers-cardless? (contains? #{"K" "J" "2" "3" "A" "Q" "8"} (:rank final-card))]
     (if (and (empty? hand) triggers-cardless?)
       (update-player state player-id #(assoc % :status :cardless))
       state)))
@@ -366,6 +369,103 @@
 (defn get-effect [state effect-type]
   (first (filter #(= effect-type (:type %)) (:effects state))))
 
+;; =============================================================================
+;; View Model (single interpreter of game state for rendering)
+;; =============================================================================
+
+(defn- banner-for
+  "Build the effect banner data. Mirrors effect precedence: penalty,
+   suit selection, required suit, awaiting answer."
+  [state my-turn? current-name]
+  (let [penalty (get-effect state :penalty)
+        select-suit (get-effect state :select-suit)
+        suit-selected (get-effect state :suit-selected)
+        awaiting-answer (get-effect state :awaiting-answer)]
+    (cond
+      penalty
+      (let [penalty-type (name (:penalty-type penalty))
+            draw-count (case (:penalty-type penalty) :two 2 :three 3 0)]
+        {:kind :penalty
+         :draw-count draw-count
+         :text (if my-turn?
+                 (str "⚠️ Penalty active (" draw-count " cards)! Play " penalty-type " to block, or accept.")
+                 (str "⚠️ Penalty active (" draw-count " cards). Waiting for " current-name "."))})
+
+      select-suit
+      {:kind :select-suit
+       :text (if my-turn?
+               "Ace played! Select a suit below."
+               (str "Waiting for " current-name " to select a suit."))}
+
+      suit-selected
+      ;; Text is composed in views: the suit glyph is presentation.
+      {:kind :suit-selected
+       :suit (:suit suit-selected)
+       :text nil}
+
+      awaiting-answer
+      {:kind :awaiting-answer
+       :text (if my-turn?
+               "Question asked! You must draw to answer."
+               (str "Question asked! Waiting for " current-name " to draw."))}
+
+      :else {:kind :none :text nil})))
+
+(defn play-view
+  "Derive everything the play screen needs from game state.
+   The single interpreter: views render this map without branching
+   on effect types or player statuses."
+  [state player-id]
+  (let [players (:players state)
+        current-idx (current-player-index state)
+        current (get players current-idx)
+        current-name (:name current)
+        my-player (first (filter #(= (:id %) player-id) players))
+        my-turn? (= player-id (:id current))
+        finished? (= :finished (:status state))
+        winner (when finished?
+                 (first (filter #(= (:id %) (:winner state)) players)))
+        penalty (get-effect state :penalty)
+        mode (cond
+               finished? :finished
+               (nil? my-player) :spectator
+               (not my-turn?) :waiting
+               (= :cardless (:status my-player)) :cardless
+               (has-effect? state :awaiting-answer) :answer
+               (has-effect? state :select-suit) :select-suit
+               :else :play)]
+    {:my-turn? my-turn?
+     :finished? finished?
+     :winner-name (:name winner)
+     :current-name current-name
+     :top-card (last (get-in state [:zones :played-stack]))
+     :deck-count (count (get-in state [:zones :deck]))
+     :direction (:direction state)
+     :banner (banner-for state my-turn? current-name)
+     :penalty? (some? penalty)
+     :penalty-draw-count (when penalty
+                           (case (:penalty-type penalty) :two 2 :three 3 0))
+     :players (mapv (fn [[idx p]]
+                      (let [current? (= idx current-idx)
+                            me? (= (:id p) player-id)
+                            kadi? (= :kadi (:status p))
+                            hand-count (count (get-hand state (:id p)))]
+                        {:id (:id p)
+                         :name (:name p)
+                         :hand-count hand-count
+                         :current? current?
+                         :me? me?
+                         :kadi? kadi?
+                         :status-text (cond
+                                        (and current? me?) "your turn"
+                                        kadi? "Kadi"
+                                        :else (str hand-count " cards"))}))
+                    (map-indexed vector players))
+     :my-hand (or (when player-id (get-hand state player-id)) [])
+     :my-status (:status my-player)
+     :mode mode
+     :poll? (and (not my-turn?) (not finished?))}))
+
 (defn- validate-join [state {:keys [id name]}]
   (cond
     (not= :lobby (game-status state)) {:error "Game is not in lobby"}
@@ -387,19 +487,24 @@
   (let [res (join-player state player)]
     (if (:ok res) (:ok res) res)))
 
+;; Forward declaration: *-cmd fns delegate to the apply-action methods below.
+(declare apply-action)
+
 (defn validate-start [state]
   (cond
     (not= :lobby (game-status state)) {:error "Game is not in lobby"}
     (< (count (players state)) 2) {:error "Need at least 2 players to start"}
     :else {:ok true}))
 
-(defn start-game-cmd [state & {:keys [cards-per-player] :or {cards-per-player 4}}]
+(defn start-game-cmd [state & {:keys [cards-per-player deck starting-card] :or {cards-per-player 4}}]
   (let [v (validate-start state)]
     (if (:error v)
       v
-      {:ok (-> state
-               (start-game {:cards-per-player cards-per-player})
-               (update-in [:meta :updated-at] (constantly (java.time.Instant/now))))})))
+      {:ok (apply-action state {:type :start-game
+                                :cards-per-player cards-per-player
+                                :deck deck
+                                :starting-card starting-card
+                                :timestamp (java.time.Instant/now)})})))
 
 (defn validate-draw [state player-id]
   (cond
@@ -413,19 +518,12 @@
   (let [v (validate-draw state player-id)]
     (if (:error v)
       v
-      (let [;; Recycle played stack if deck is empty
-            state' (cond-> state
-                     (empty? (get-in state [:zones :deck]))
-                     recycle-played-stack)
-            ;; If still empty after recycle, skip player (no draw)
-            can-draw? (seq (get-in state' [:zones :deck]))]
-        {:ok (-> state'
-                 (cond-> can-draw? (draw-card player-id :maintain-kadi? maintain-kadi?))
-                 (advance-turn)
-                 (update-in [:meta :updated-at] (constantly (java.time.Instant/now))))}))))
+      {:ok (apply-action state {:type :draw-card
+                                :player-id player-id
+                                :maintain-kadi? maintain-kadi?
+                                :timestamp (java.time.Instant/now)})})))
 
-(defn validate-play-cards [state player-id cards]
-  (cond
+(defn validate-play-cards [state player-id cards]  (cond
     (not= :live (game-status state)) {:error "Game is not live"}
     (not (get-player state player-id)) {:error "Player not in game"}
     (not= player-id (current-player-id state)) {:error "Not your turn"}
@@ -433,33 +531,15 @@
     :else (validation/validate-play (with-embedded-hands state) player-id cards)))
 
 (defn play-cards-cmd [state player-id cards & {:keys [declare-kadi?] :or {declare-kadi? false}}]
-  (let [v (validate-play-cards state player-id cards)
-        ;; Capture the top card BEFORE adding new cards to played stack
-        prev-top-card (last (get-in state [:zones :played-stack]))]
+  (let [v (validate-play-cards state player-id cards)]
     (if (:error v)
       v
       (if (:valid? v)
-        {:ok (-> state
-                 ;; Step 1: Set player to :kadi if declaring
-                 (cond-> declare-kadi? (update-player player-id #(assoc % :status :kadi)))
-                 ;; Step 2: Play cards normally
-                 (update :effects #(remove (fn [e] (= :suit-selected (:type e))) %))
-                 (remove-cards-from-hand player-id cards)
-                 (add-to-played-stack cards)
-                 (apply-card-effects cards prev-top-card)
-                 ;; Step 3: Check cardless (may set to :cardless if invalid finish)
-                 (check-cardless player-id cards)
-                 ;; Step 4: Check for win (if still in :kadi and hand empty)
-                 (as-> s
-                   (let [player (get-player s player-id)
-                         hand (get-hand s player-id)]
-                     (if (and (= :kadi (:status player)) (empty? hand))
-                       (-> s
-                           (assoc :status :finished)
-                           (assoc :winner player-id))
-                       s)))
-                 (maybe-advance-turn cards)
-                 (update-in [:meta :updated-at] (constantly (java.time.Instant/now))))}
+        {:ok (apply-action state {:type :play-cards
+                                  :player-id player-id
+                                  :cards cards
+                                  :declare-kadi? declare-kadi?
+                                  :timestamp (java.time.Instant/now)})}
         {:error (:reason v)}))))
 
 (defn validate-select-suit [state suit]
@@ -474,11 +554,9 @@
         v (validate-select-suit state normalized-suit)]
     (if (:error v)
       v
-      {:ok (-> state
-               (update :effects #(remove (fn [e] (= :select-suit (:type e))) %))
-               (update :effects conj {:type :suit-selected :suit normalized-suit})
-               (advance-turn)
-               (update-in [:meta :updated-at] (constantly (java.time.Instant/now))))})))
+      {:ok (apply-action state {:type :select-suit
+                                :suit suit
+                                :timestamp (java.time.Instant/now)})})))
 
 (defn validate-answer [state player-id]
   (cond
@@ -492,22 +570,15 @@
   (let [v (validate-answer state player-id)]
     (if (:error v)
       v
-      (let [;; Recycle played stack if deck is empty
-            state' (cond-> state
-                     (empty? (get-in state [:zones :deck]))
-                     recycle-played-stack)
-            ;; If still empty after recycle, skip player (no draw)
-            can-draw? (seq (get-in state' [:zones :deck]))]
-        {:ok (-> state'
-                 (cond-> can-draw? (draw-card player-id))
-                 (update :effects #(remove (fn [e] (= :awaiting-answer (:type e))) %))
-                 (advance-turn)
-                 (update-in [:meta :updated-at] (constantly (java.time.Instant/now))))}))))
+      {:ok (apply-action state {:type :answer-question
+                                :player-id player-id
+                                :timestamp (java.time.Instant/now)})})))
 
 (defn validate-accept-penalty [state player-id]
   (cond
     (not= :live (game-status state)) {:error "Game is not live"}
     (not (get-player state player-id)) {:error "Player not in game"}
+    (not= player-id (current-player-id state)) {:error "Not your turn"}
     (not (has-effect? state :penalty)) {:error "No penalty in progress"}
     :else {:ok true}))
 
@@ -515,9 +586,9 @@
   (let [v (validate-accept-penalty state player-id)]
     (if (:error v)
       v
-      {:ok (-> state
-               (accept-penalty player-id)
-               (update-in [:meta :updated-at] (constantly (java.time.Instant/now))))})))
+      {:ok (apply-action state {:type :accept-penalty
+                                :player-id player-id
+                                :timestamp (java.time.Instant/now)})})))
 
 ;; =============================================================================
 ;; Event Replay (apply-action assumes events are valid)
@@ -537,9 +608,29 @@
   (cond-> (add-player-metadata state player)
     timestamp (update-in [:meta :updated-at] (constantly timestamp))))
 
-(defmethod apply-action :start-game [state {:keys [timestamp]}]
-  (cond-> (start-game state {})
-    timestamp (update-in [:meta :updated-at] (constantly timestamp))))
+(defmethod apply-action :start-game [state {:keys [timestamp cards-per-player deck starting-card zones]}]
+  ;; The event carries the deal so every replay is identical: :zones
+  ;; (backfilled legacy deals) win verbatim, else the persisted :deck is
+  ;; dealt. Legacy events with neither fall back to a fresh shuffle —
+  ;; deterministic replay is impossible for those (original deal lost),
+  ;; so prefer the cache for such games and backfill where sound.
+  ;; Normalize stored cards (suits arrive as strings after JSON roundtrip).
+  (if zones
+    (let [normalize-zone-cards (fn [cards] (vec (schema/normalize-cards cards)))
+          hands (into {} (map (fn [[pid hand]] [pid (normalize-zone-cards hand)]))
+                      (:hands zones))]
+      (cond-> (-> state
+                  (assoc :status :live)
+                  (assoc-in [:zones :deck] (normalize-zone-cards (:deck zones)))
+                  (assoc-in [:zones :played-stack] (normalize-zone-cards (:played-stack zones)))
+                  (assoc-in [:zones :hands] hands))
+        timestamp (update-in [:meta :updated-at] (constantly timestamp))))
+    (let [deck (when deck (vec (schema/normalize-cards deck)))
+          starting-card (when starting-card (first (schema/normalize-cards [starting-card])))]
+      (cond-> (start-game state {:cards-per-player (or cards-per-player 4)
+                                 :deck deck
+                                 :starting-card starting-card})
+        timestamp (update-in [:meta :updated-at] (constantly timestamp))))))
 
 (defmethod apply-action :play-cards [state {:keys [player-id cards declare-kadi? timestamp]}]
   (let [normalized-cards (schema/normalize-cards cards)

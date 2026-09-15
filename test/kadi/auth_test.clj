@@ -1,5 +1,7 @@
 (ns kadi.auth-test
   (:require [clojure.test :refer [deftest testing is]]
+            [clojure.string :as str]
+            [clojure.tools.logging :as log]
             [kadi.auth :as auth]
             [kadi.schema :as schema]
             [malli.core :as m]
@@ -228,12 +230,12 @@
 (deftest send-signin-email!-test
   (testing "logs sign-in link in dev mode"
     (let [log-messages (atom [])
-          orig-log* clojure.tools.logging/log*]
-      (with-redefs [clojure.tools.logging/log* (fn [logger level throwable message]
-                                                 (swap! log-messages conj message)
-                                                 (orig-log* logger level throwable message))]
+          orig-log* log/log*]
+      (with-redefs [log/log* (fn [logger level throwable message]
+                               (swap! log-messages conj message)
+                               (orig-log* logger level throwable message))]
         (auth/send-signin-email! {:email "dev@test.com" :token "tok123"}))
-      (let [output (clojure.string/join "\n" @log-messages)]
+      (let [output (str/join "\n" @log-messages)]
         (is (.contains output "SIGN-IN LINK"))
         (is (.contains output "Email: dev@test.com"))
         (is (.contains output "/auth/verify/tok123"))))))

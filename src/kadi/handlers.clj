@@ -54,6 +54,19 @@
         [game (str "Game is in " (name actual-status) " status, not " (name expected-status))]))
     [nil "Game not found"]))
 
+(defn- persist-event!
+  "Append an event guarded by the sequence the command was validated
+   against. Returns nil on success, or a retry message when a concurrent
+   writer advanced the game first (optimistic concurrency)."
+  [game event-id event-type timestamp event-data]
+  (try
+    (db/append-event! (:id game) event-id event-type timestamp event-data (:state_sequence game))
+    nil
+    (catch clojure.lang.ExceptionInfo e
+      (if (= :stale-state (:reason (ex-data e)))
+        "The game changed just now — please try again."
+        (throw e)))))
+
 ;; =============================================================================
 ;; Auth Handlers
 ;; =============================================================================
@@ -152,9 +165,10 @@
        :body (views/players-list-fragment {:players (get-in game [:state :players])})}
       {:status 404 :body "Game not found"})))
 
-(defn get-lobby-status-fragment [request]
+(defn get-lobby-status-fragment
   "HTMX endpoint for refreshing lobby status - includes player list and action buttons.
    When the game has started, responds with HX-Redirect to send players to the game page."
+  [request]
   (let [short-code (get-in request [:path-params :code])
         player (auth/current-player request)]
     (if-let [game (db/get-game-by-code short-code)]
@@ -166,8 +180,9 @@
          :body (views/lobby-status-fragment {:player player :game game})})
       {:status 404 :body "Game not found"})))
 
-(defn get-game-state-fragment [request]
+(defn get-game-state-fragment
   "HTMX endpoint for polling game state updates - returns game-play-content fragment."
+  [request]
   (let [short-code (get-in request [:path-params :code])
         player (auth/current-player request)]
     (if-let [game (db/get-game-by-code short-code)]
@@ -187,25 +202,28 @@
                        (game/join-player (:state game) player))]
           (if (:error result)
             (redirect (str "/games/" short-code) {:type :error :message (:error result)})
-            (do
-              (when-not already-joined?
-                (let [event-id (str (java.util.UUID/randomUUID))
-                      timestamp (java.time.Instant/now)
-                      action {:player (select-keys player [:id :name])
-                              :timestamp timestamp}]
-                  (db/append-event! (:id game) event-id :join-game timestamp action)
-                  (db/add-player-to-game! (:id game) (:id player))))
-              (redirect (str "/games/" short-code)))))
+            (if already-joined?
+              (redirect (str "/games/" short-code))
+              (let [event-id (str (java.util.UUID/randomUUID))
+                    timestamp (java.time.Instant/now)
+                    action {:player (select-keys player [:id :name])
+                            :timestamp timestamp}]
+                (if-let [retry-msg (persist-event! game event-id :join-game timestamp action)]
+                  (redirect (str "/games/" short-code) {:type :error :message retry-msg})
+                  (do (db/add-player-to-game! (:id game) (:id player))
+                      (redirect (str "/games/" short-code))))))))
         (redirect "/games" {:type :error :message "Game not found"})))
     (redirect "/auth/signin")))
 
-(defn join-page [request]
+(defn join-page
   "Display the join game page with code input."
+  [request]
   (let [player (auth/current-player request)]
     (html-response (views/join-page {:player player :flash (:flash request)}))))
 
-(defn join-game-by-code [request]
+(defn join-game-by-code
   "Join a game by short code from the join form."
+  [request]
   (if-let [player (auth/current-player request)]
     (let [short-code (clojure.string/upper-case (clojure.string/trim (get-in request [:params :code] "")))
           game (when (seq short-code) (db/get-game-by-code short-code))]
@@ -216,15 +234,16 @@
                        (game/join-player (:state game) player))]
           (if (:error result)
             (redirect "/games/join" {:type :error :message (:error result)})
-            (do
-              (when-not already-joined?
-                (let [event-id (str (java.util.UUID/randomUUID))
-                      timestamp (java.time.Instant/now)
-                      action {:player (select-keys player [:id :name])
-                              :timestamp timestamp}]
-                  (db/append-event! (:id game) event-id :join-game timestamp action)
-                  (db/add-player-to-game! (:id game) (:id player))))
-              (redirect (str "/games/" short-code)))))
+            (if already-joined?
+              (redirect (str "/games/" short-code))
+              (let [event-id (str (java.util.UUID/randomUUID))
+                    timestamp (java.time.Instant/now)
+                    action {:player (select-keys player [:id :name])
+                            :timestamp timestamp}]
+                (if-let [retry-msg (persist-event! game event-id :join-game timestamp action)]
+                  (redirect "/games/join" {:type :error :message retry-msg})
+                  (do (db/add-player-to-game! (:id game) (:id player))
+                      (redirect (str "/games/" short-code))))))))
         (redirect "/games/join" {:type :error :message (if (seq short-code)
                                                          "Game not found"
                                                          "Please enter a game code")})))
@@ -240,11 +259,11 @@
           (let [result (game/start-game-cmd (:state game))]
             (if (:error result)
               (redirect (str "/games/" short-code) {:type :error :message (:error result)})
-              (do
-                (let [event-id (str (java.util.UUID/randomUUID))
-                      timestamp (java.time.Instant/now)]
-                  (db/append-event! (:id game) event-id :start-game timestamp {:timestamp timestamp}))
-                (redirect (str "/games/" short-code))))))
+              (let [event-id (str (java.util.UUID/randomUUID))
+                    timestamp (java.time.Instant/now)]
+                (if-let [retry-msg (persist-event! game event-id :start-game timestamp {:timestamp timestamp})]
+                  (redirect (str "/games/" short-code) {:type :error :message retry-msg})
+                  (redirect (str "/games/" short-code)))))))
         (redirect "/games" {:type :error :message "Game not found"})))
     (redirect "/auth/signin")))
 
@@ -260,7 +279,7 @@
                 ;; Use ordered-cards parameter which preserves selection order
                 ordered-cards-str (get params "ordered-cards")
                 card-ids (if (and ordered-cards-str (not= ordered-cards-str ""))
-                           (clojure.string/split ordered-cards-str #",")
+                           (str/split ordered-cards-str #",")
                            [])
                 parsed-cards (keep cards/id->card card-ids)
                 ;; Parse declare-kadi checkbox (will be "on" if checked)
@@ -271,16 +290,16 @@
                                             :declare-kadi? declare-kadi?)]
             (if (:error result)
               (redirect (str "/games/" short-code) {:type :error :message (:error result)})
-              (do
-                (let [event-id (str (java.util.UUID/randomUUID))
-                      timestamp (java.time.Instant/now)]
-                  (db/append-event! (:id game) event-id :play-cards timestamp
-                                    {:player-id (:id player)
-                                     :cards parsed-cards
-                                     :declare-kadi? declare-kadi?
-                                     :hand-size-before hand-size-before
-                                     :timestamp timestamp}))
-                (redirect (str "/games/" short-code))))))))
+              (let [event-id (str (java.util.UUID/randomUUID))
+                    timestamp (java.time.Instant/now)]
+                (if-let [retry-msg (persist-event! game event-id :play-cards timestamp
+                                                   {:player-id (:id player)
+                                                    :cards parsed-cards
+                                                    :declare-kadi? declare-kadi?
+                                                    :hand-size-before hand-size-before
+                                                    :timestamp timestamp})]
+                  (redirect (str "/games/" short-code) {:type :error :message retry-msg})
+                  (redirect (str "/games/" short-code)))))))))
     (redirect "/auth/signin")))
 
 (defn draw-card [request]
@@ -298,14 +317,14 @@
                                            :maintain-kadi? maintain-kadi?)]
             (if (:error result)
               (redirect (str "/games/" short-code) {:type :error :message (:error result)})
-              (do
-                (let [event-id (str (java.util.UUID/randomUUID))
-                      timestamp (java.time.Instant/now)]
-                  (db/append-event! (:id game) event-id :draw-card timestamp
-                                    {:player-id (:id player)
-                                     :maintain-kadi? maintain-kadi?
-                                     :timestamp timestamp}))
-                (redirect (str "/games/" short-code))))))))
+              (let [event-id (str (java.util.UUID/randomUUID))
+                    timestamp (java.time.Instant/now)]
+                (if-let [retry-msg (persist-event! game event-id :draw-card timestamp
+                                                   {:player-id (:id player)
+                                                    :maintain-kadi? maintain-kadi?
+                                                    :timestamp timestamp})]
+                  (redirect (str "/games/" short-code) {:type :error :message retry-msg})
+                  (redirect (str "/games/" short-code)))))))))
     (redirect "/auth/signin")))
 
 (defn select-suit [request]
@@ -322,13 +341,13 @@
                 result (game/select-suit-cmd (:state game) suit)]
             (if (:error result)
               (redirect (str "/games/" short-code) {:type :error :message (:error result)})
-              (do
-                (let [event-id (str (java.util.UUID/randomUUID))
-                      timestamp (java.time.Instant/now)]
-                  (db/append-event! (:id game) event-id :select-suit timestamp
-                                    {:suit suit
-                                     :timestamp timestamp}))
-                (redirect (str "/games/" short-code))))))))
+              (let [event-id (str (java.util.UUID/randomUUID))
+                    timestamp (java.time.Instant/now)]
+                (if-let [retry-msg (persist-event! game event-id :select-suit timestamp
+                                                   {:suit suit
+                                                    :timestamp timestamp})]
+                  (redirect (str "/games/" short-code) {:type :error :message retry-msg})
+                  (redirect (str "/games/" short-code)))))))))
     (redirect "/auth/signin")))
 
 (defn accept-penalty [request]
@@ -342,13 +361,13 @@
           (let [result (game/accept-penalty-cmd (:state game) (:id player))]
             (if (:error result)
               (redirect (str "/games/" short-code) {:type :error :message (:error result)})
-              (do
-                (let [event-id (str (java.util.UUID/randomUUID))
-                      timestamp (java.time.Instant/now)]
-                  (db/append-event! (:id game) event-id :accept-penalty timestamp
-                                    {:player-id (:id player)
-                                     :timestamp timestamp}))
-                (redirect (str "/games/" short-code))))))))
+              (let [event-id (str (java.util.UUID/randomUUID))
+                    timestamp (java.time.Instant/now)]
+                (if-let [retry-msg (persist-event! game event-id :accept-penalty timestamp
+                                                   {:player-id (:id player)
+                                                    :timestamp timestamp})]
+                  (redirect (str "/games/" short-code) {:type :error :message retry-msg})
+                  (redirect (str "/games/" short-code)))))))))
     (redirect "/auth/signin")))
 
 (defn answer-question [request]
@@ -362,11 +381,11 @@
           (let [result (game/answer-question-cmd (:state game) (:id player))]
             (if (:error result)
               (redirect (str "/games/" short-code) {:type :error :message (:error result)})
-              (do
-                (let [event-id (str (java.util.UUID/randomUUID))
-                      timestamp (java.time.Instant/now)]
-                  (db/append-event! (:id game) event-id :answer-question timestamp
-                                    {:player-id (:id player)
-                                     :timestamp timestamp}))
-                (redirect (str "/games/" short-code))))))))
+              (let [event-id (str (java.util.UUID/randomUUID))
+                    timestamp (java.time.Instant/now)]
+                (if-let [retry-msg (persist-event! game event-id :answer-question timestamp
+                                                   {:player-id (:id player)
+                                                    :timestamp timestamp})]
+                  (redirect (str "/games/" short-code) {:type :error :message retry-msg})
+                  (redirect (str "/games/" short-code)))))))))
     (redirect "/auth/signin")))

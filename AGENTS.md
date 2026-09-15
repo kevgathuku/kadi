@@ -231,8 +231,13 @@ See `docs/CLOJURE_BOOTSTRAP_BRIEF.md` for complete rules.
 
 ## Testing Strategy
 
-Tests are pure - no database setup required:
+Tests that touch the database must use an isolated fixture-local file
+(`test-<namespace>.db` with `:each` setup/teardown that deletes,
+re-initialises, and removes it — see `test/kadi/db_test.clj`), never the
+dev `kadi.db`. Pure namespaces need no setup; stub DB access with
+`with-redefs` where possible.
 
+Pure game-logic tests need no database setup:
 ```clojure
 (deftest play-king-reverses-direction
   (let [game (make-test-game)
@@ -241,6 +246,14 @@ Tests are pure - no database setup required:
                                         :cards [king]})]
     (is (= :counter-clockwise (:direction result)))))
 ```
+
+Every `testing` block must live inside a `deftest`, and every `deftest`
+must be a top-level form. A stray top-level `testing` executes its body
+(including DB writes) at namespace load time with its assertions invisible
+to the runner; a dropped paren can nest whole deftests inside another test
+body where the runner silently skips them. If assertion counts drop
+unexpectedly, verify with: count vars carrying `:test` metadata, e.g.
+`(count (filter (comp :test meta) (vals (ns-interns 'kadi.db-test))))`.
 
 ## Development Guidelines
 
@@ -269,3 +282,13 @@ The Elixir/Phoenix implementation is preserved at:
 # View old implementation
 git show v1.0-elixir:lib/kadi/games/play_validator.ex
 ```
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in GitHub Issues via `gh`. See `docs/agents/issue-tracker.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` + `docs/adr/` at the repo root (ADRs created lazily; none yet). See `docs/agents/domain.md`.

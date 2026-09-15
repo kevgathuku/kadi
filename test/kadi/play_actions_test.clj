@@ -4,7 +4,6 @@
             [kadi.handlers :as handlers]
             [kadi.db :as db]
             [kadi.game :as game]
-            [kadi.server :as server]
             [ring.middleware.params :refer [wrap-params]]
             [ring.middleware.keyword-params :refer [wrap-keyword-params]]
             [next.jdbc :as jdbc]))
@@ -21,6 +20,9 @@
 (db/init!)
 
 (defn with-test-db [f]
+  ;; Re-assert our DB per-test: alter-var-root at load time loses to
+  ;; whichever test namespace loads last.
+  (alter-var-root #'db/*db-spec* (constantly test-db-spec))
   ;; Clean up before test
   (let [file (java.io.File. test-db-file)]
     (when (.exists file)
