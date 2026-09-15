@@ -3,6 +3,7 @@
             [clojure.string :as str]
             [kadi.db :as db]
             [kadi.game :as game]
+            [kadi.cards :as cards]
             [kadi.schema :as schema]
             [next.jdbc :as jdbc]
             [next.jdbc.result-set :as rs]))
@@ -352,20 +353,15 @@
           {:keys [id short-code]} (db/create-game! {:player p1 :timestamp ts})
           ;; :meta holds wall-clock Instants stamped by new-game at replay
           ;; time, so it can never match across two replays; compare game
-          ;; content only. NOTE: :start-game shuffles with an unseeded
-          ;; shuffle, so dealt zones differ on every replay by design —
-          ;; compare those structurally (counts) instead of by value.
+          ;; content only. :start-game persists its deal in the event, so
+          ;; dealt zones are identical on every replay — compare everything.
           check (fn [label]
                   (let [a (dissoc (schema/normalize-game (db/rebuild-state-from-events id)) :meta)
                         b (dissoc (get-in (db/get-game-by-code short-code) [:state]) :meta)]
-                    (if (= :live (:status a))
-                      (do (is (= (dissoc a :zones) (dissoc b :zones))
-                              (str label ": non-zone state matches"))
-                          (is (= (update-vals (:zones a) count) (update-vals (:zones b) count))
-                              (str label ": zone counts match"))
-                          (is (= (count (get-in a [:zones :hands 1])) 4))
-                          (is (= (count (get-in a [:zones :hands 2])) 4)))
-                      (is (= a b) (str label ": cache matches full replay")))))]
+                    (is (= a b) (str label ": cache matches full replay"))
+                    (when (= :live (:status a))
+                      (is (= 4 (count (get-in a [:zones :hands 1]))))
+                      (is (= 4 (count (get-in a [:zones :hands 2])))))))]
       (check "after-create") ; seq 0 -> full rebuild from scratch
       (db/append-event! id "e-join" :join-game ts {:player p2 :timestamp ts})
       (check "after-join") ; stale -> snapshot + incremental replay
@@ -373,6 +369,42 @@
       (check "after-start") ; stale again, now with hands dealt
       (let [row (db/get-game-by-code short-code)]
         (is (= 3 (:state_sequence row)) "cache tracks the last event")))))
+
+(deftest start-game-replay-deterministic-test
+  (testing ":start-game persists its deal, so replays are identical"
+    (let [ts (java.time.Instant/parse "2026-01-01T00:00:00Z")
+          p1 {:id 1 :name "alice"}
+          p2 {:id 2 :name "bob"}
+          {:keys [id short-code]} (db/create-game! {:player p1 :timestamp ts})
+          _ (db/append-event! id "e-join" :join-game ts {:player p2 :timestamp ts})
+          ;; No deck supplied: append must persist the deal in the event.
+          _ (db/append-event! id "e-start" :start-game ts {:timestamp ts})
+          no-meta #(dissoc % :meta)
+          a (no-meta (schema/normalize-game (db/rebuild-state-from-events id)))
+          b (no-meta (schema/normalize-game (db/rebuild-state-from-events id)))
+          cached (no-meta (get-in (db/get-game-by-code short-code) [:state]))]
+      (is (= a b) "two from-scratch replays are fully identical")
+      (is (= a cached) "cache equals full replay, including dealt zones"))))
+
+(deftest start-game-cards-per-player-persisted-test
+  (testing "non-default cards-per-player survives the event roundtrip"
+    (let [ts (java.time.Instant/parse "2026-01-01T00:00:00Z")
+          p1 {:id 1 :name "alice"}
+          p2 {:id 2 :name "bob"}
+          {:keys [id short-code]} (db/create-game! {:player p1 :timestamp ts})
+          _ (db/append-event! id "e-join" :join-game ts {:player p2 :timestamp ts})
+          deck (cards/make-deck)
+          starting (cards/select-starting-card deck)
+          _ (db/append-event! id "e-start" :start-game ts
+                              {:timestamp ts :cards-per-player 2
+                               :deck deck :starting-card starting})
+          rebuilt (db/rebuild-state-from-events id)
+          cached (get-in (db/get-game-by-code short-code) [:state])]
+      (is (= 2 (count (game/get-hand rebuilt 1))))
+      (is (= 2 (count (game/get-hand rebuilt 2))))
+      (is (= (dissoc (schema/normalize-game rebuilt) :meta)
+             (dissoc cached :meta))
+          "replay with explicit count matches cache"))))
 
 (deftest stale-cache-refresh-never-regresses-test
   (testing "stale refresh must not overwrite newer cache (CAS)"

@@ -211,12 +211,14 @@
 ;; =============================================================================
 
 (defn start-game
-  "Transition game from lobby to live, deal cards, set starting card."
-  [state {:keys [cards-per-player] :or {cards-per-player 4}}]
+  "Transition game from lobby to live, deal cards, set starting card.
+   Optional :deck / :starting-card make the deal deterministic —
+   event replay passes the deal stored in the :start-game event."
+  [state {:keys [cards-per-player deck starting-card] :or {cards-per-player 4}}]
   (if (< (count (:players state)) 2)
     state
-    (let [deck (cards/make-deck)
-          starting-card (cards/select-starting-card deck)
+    (let [deck (or deck (cards/make-deck))
+          starting-card (or starting-card (cards/select-starting-card deck))
           deck-without-start (vec (remove #{starting-card} deck))]
       (-> state
           (assoc :status :live)
@@ -495,13 +497,15 @@
     (< (count (players state)) 2) {:error "Need at least 2 players to start"}
     :else {:ok true}))
 
-(defn start-game-cmd [state & {:keys [cards-per-player] :or {cards-per-player 4}}]
+(defn start-game-cmd [state & {:keys [cards-per-player deck starting-card] :or {cards-per-player 4}}]
   (let [v (validate-start state)]
     (if (:error v)
       v
-      {:ok (-> state
-               (start-game {:cards-per-player cards-per-player})
-               (update-in [:meta :updated-at] (constantly (java.time.Instant/now))))})))
+      {:ok (apply-action state {:type :start-game
+                                :cards-per-player cards-per-player
+                                :deck deck
+                                :starting-card starting-card
+                                :timestamp (java.time.Instant/now)})})))
 
 (defn validate-draw [state player-id]
   (cond
@@ -605,9 +609,17 @@
   (cond-> (add-player-metadata state player)
     timestamp (update-in [:meta :updated-at] (constantly timestamp))))
 
-(defmethod apply-action :start-game [state {:keys [timestamp]}]
-  (cond-> (start-game state {})
-    timestamp (update-in [:meta :updated-at] (constantly timestamp))))
+(defmethod apply-action :start-game [state {:keys [timestamp cards-per-player deck starting-card]}]
+  ;; The event carries the deal (persisted at append time) so every replay
+  ;; deals identical hands; legacy events without a deck fall back to a
+  ;; fresh shuffle. Normalize the stored cards (suits arrive as strings
+  ;; after the JSON roundtrip).
+  (let [deck (when deck (vec (schema/normalize-cards deck)))
+        starting-card (when starting-card (first (schema/normalize-cards [starting-card])))]
+    (cond-> (start-game state {:cards-per-player (or cards-per-player 4)
+                               :deck deck
+                               :starting-card starting-card})
+      timestamp (update-in [:meta :updated-at] (constantly timestamp)))))
 
 (defmethod apply-action :play-cards [state {:keys [player-id cards declare-kadi? timestamp]}]
   (let [normalized-cards (schema/normalize-cards cards)

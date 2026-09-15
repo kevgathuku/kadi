@@ -3,6 +3,7 @@
   (:require [next.jdbc :as jdbc]
             [next.jdbc.result-set :as rs]
             [jsonista.core :as json]
+            [kadi.cards :as cards]
             [kadi.game :as game]
             [kadi.schema :as schema]))
 
@@ -216,41 +217,51 @@
    (when (nil? game-id)
      (throw (Exception. "game-id cannot be nil in append-event!")))
    (let [ds (datasource)]
-    (with-write-txn ds
-      (fn [tx]
-        (let [existing (jdbc/execute-one! tx
-                                          ["SELECT sequence_number, event_type, event_data FROM game_events WHERE event_id = ?"
-                                           event-id]
-                                          {:builder-fn rs/as-unqualified-lower-maps})]
-          (if existing
+     (with-write-txn ds
+       (fn [tx]
+         (let [existing (jdbc/execute-one! tx
+                                           ["SELECT sequence_number, event_type, event_data FROM game_events WHERE event_id = ?"
+                                            event-id]
+                                           {:builder-fn rs/as-unqualified-lower-maps})]
+           (if existing
             ;; Event already exists, return it (idempotent)
-            (assoc existing :event_data (<-json (:event_data existing)))
+             (assoc existing :event_data (<-json (:event_data existing)))
             ;; New event: compute base state first (cache tracks next-seq - 1
             ;; at this point), then insert, apply, and write the cache.
-            (let [next-seq (or (:seq (jdbc/execute-one! tx
-                                                        ["SELECT COALESCE(MAX(sequence_number), 0) + 1 as seq FROM game_events WHERE game_id = ?" game-id]
-                                                        {:builder-fn rs/as-unqualified-lower-maps}))
-                               1)
+            ;; A :start-game event must carry its deal: shuffling here and
+            ;; storing the deck makes every later replay deterministic.
+            ;; Legacy callers send only {:timestamp}; enrich those.
+            (let [event-data (if (and (= :start-game event-type) (nil? (:deck event-data)))
+                               (let [deck (cards/make-deck)]
+                                 (assoc event-data
+                                        :deck deck
+                                        :starting-card (cards/select-starting-card deck)
+                                        :cards-per-player (or (:cards-per-player event-data) 4)))
+                               event-data)
+                  next-seq (or (:seq (jdbc/execute-one! tx
+                                                         ["SELECT COALESCE(MAX(sequence_number), 0) + 1 as seq FROM game_events WHERE game_id = ?" game-id]
+                                                         {:builder-fn rs/as-unqualified-lower-maps}))
+                                1)
                   ;; Optimistic concurrency: the caller validated its command
                   ;; against expected-seq. Inside the write lock the log still
                   ;; has to end there, else a concurrent writer got in first.
-                  _ (when (and (some? expected-seq) (not= (dec next-seq) expected-seq))
-                      (throw (ex-info "Stale game state: event log advanced since validation"
-                                      {:reason :stale-state
-                                       :expected expected-seq
-                                       :actual (dec next-seq)})))
-                  base-state (fresh-state-tx tx game-id)
-                  _ (jdbc/execute-one! tx
-                                       ["INSERT INTO game_events (game_id, sequence_number, event_id, event_type, event_data, timestamp) VALUES (?, ?, ?, ?, ?, ?)"
-                                        game-id next-seq event-id (name event-type) (->json event-data) (str timestamp)]
-                                       {:return-keys true
-                                        :builder-fn rs/as-unqualified-lower-maps})
-                  new-state (game/apply-action base-state (merge event-data {:type event-type}))
-                  normalized (schema/normalize-game new-state)]
-              (jdbc/execute-one! tx
-                                 ["UPDATE games SET state = ?, state_sequence = ?, updated_at = datetime('now') WHERE id = ?"
-                                  (->json normalized) next-seq game-id])
-              {:sequence_number next-seq :event_type event-type :event_data event-data}))))))))
+                   _ (when (and (some? expected-seq) (not= (dec next-seq) expected-seq))
+                       (throw (ex-info "Stale game state: event log advanced since validation"
+                                       {:reason :stale-state
+                                        :expected expected-seq
+                                        :actual (dec next-seq)})))
+                   base-state (fresh-state-tx tx game-id)
+                   _ (jdbc/execute-one! tx
+                                        ["INSERT INTO game_events (game_id, sequence_number, event_id, event_type, event_data, timestamp) VALUES (?, ?, ?, ?, ?, ?)"
+                                         game-id next-seq event-id (name event-type) (->json event-data) (str timestamp)]
+                                        {:return-keys true
+                                         :builder-fn rs/as-unqualified-lower-maps})
+                   new-state (game/apply-action base-state (merge event-data {:type event-type}))
+                   normalized (schema/normalize-game new-state)]
+               (jdbc/execute-one! tx
+                                  ["UPDATE games SET state = ?, state_sequence = ?, updated_at = datetime('now') WHERE id = ?"
+                                   (->json normalized) next-seq game-id])
+               {:sequence_number next-seq :event_type event-type :event_data event-data}))))))))
 
 ;; =============================================================================
 ;; Game Operations

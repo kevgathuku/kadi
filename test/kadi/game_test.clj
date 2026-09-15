@@ -1451,6 +1451,25 @@
           (is (some? via-cmd))
           (is (= (no-meta via-apply) (no-meta via-cmd))))))))
 
+(deftest start-game-cmd-apply-parity-test
+  (testing "start-game-cmd delegates to apply-action, preserving cards-per-player"
+    (let [ts (java.time.Instant/parse "2026-01-01T00:00:00Z")
+          base (-> (game/new-game "TEST")
+                   (#(:ok (game/join-player % {:id 1 :name "Alice"})))
+                   (#(:ok (game/join-player % {:id 2 :name "Bob"}))))
+          deck (cards/make-deck)
+          starting (cards/select-starting-card deck)
+          via-cmd (:ok (game/start-game-cmd base :cards-per-player 2 :deck deck :starting-card starting))
+          via-apply (game/apply-action base {:type :start-game
+                                             :cards-per-player 2
+                                             :deck deck
+                                             :starting-card starting
+                                             :timestamp ts})]
+      (is (some? via-cmd) "cmd should succeed")
+      (is (= 2 (count (game/get-hand via-cmd 1))) "cmd deals non-default count")
+      (is (= (dissoc via-apply :meta) (dissoc via-cmd :meta))
+          "cmd and apply-action produce identical states for identical input"))))
+
 (deftest migrated-cmd-error-branches-test
   (testing "draw-card during penalty must accept first"
     (let [game (-> (make-test-game)
