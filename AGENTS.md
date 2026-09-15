@@ -238,7 +238,6 @@ dev `kadi.db`. Pure namespaces need no setup; stub DB access with
 `with-redefs` where possible.
 
 Pure game-logic tests need no database setup:
-
 ```clojure
 (deftest play-king-reverses-direction
   (let [game (make-test-game)
@@ -247,6 +246,14 @@ Pure game-logic tests need no database setup:
                                         :cards [king]})]
     (is (= :counter-clockwise (:direction result)))))
 ```
+
+Every `testing` block must live inside a `deftest`, and every `deftest`
+must be a top-level form. A stray top-level `testing` executes its body
+(including DB writes) at namespace load time with its assertions invisible
+to the runner; a dropped paren can nest whole deftests inside another test
+body where the runner silently skips them. If assertion counts drop
+unexpectedly, verify with: count vars carrying `:test` metadata, e.g.
+`(count (filter (comp :test meta) (vals (ns-interns 'kadi.db-test))))`.
 
 ## Development Guidelines
 
