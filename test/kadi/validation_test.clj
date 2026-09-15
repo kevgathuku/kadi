@@ -168,17 +168,17 @@
     (testing "penalty scenario - must block or accept"
       (let [state (-> base-state
                       (assoc :effects [{:type :penalty :penalty-type :two}])
-                      (assoc-in [:players 0 :hand] [(cards/make-card :hearts "5")]))]
-        (let [result (validation/validate-play state 1 [(cards/make-card :hearts "5")])]
-          (is (not (:valid? result)))
-          (is (= "Must block penalty with matching card or Ace" (:reason result))))))
+                      (assoc-in [:players 0 :hand] [(cards/make-card :hearts "5")]))
+            result (validation/validate-play state 1 [(cards/make-card :hearts "5")])]
+        (is (not (:valid? result)))
+        (is (= "Must block penalty with matching card or Ace" (:reason result)))))
 
     (testing "awaiting-answer - cannot play normal cards"
       (let [state (-> base-state
-                      (assoc :effects [{:type :awaiting-answer}]))]
-        (let [result (validation/validate-play state 1 [(cards/make-card :hearts "5")])]
-          (is (not (:valid? result)))
-          (is (= "Must draw to answer the question first" (:reason result))))))))
+                      (assoc :effects [{:type :awaiting-answer}]))
+            result (validation/validate-play state 1 [(cards/make-card :hearts "5")])]
+        (is (not (:valid? result)))
+        (is (= "Must draw to answer the question first" (:reason result)))))))
 
 ;; =============================================================================
 ;; Q+answer validate-play Tests (Bug 1 regression tests)
@@ -213,10 +213,10 @@
 
     (testing "8 + matching answer card is accepted"
       (let [state (-> base-state
-                      (assoc-in [:zones :played-stack] [(cards/make-card :clubs "8")]))]
-        (let [result (validation/validate-play state 1
-                                               [(cards/make-card :hearts "8") (cards/make-card :hearts "5")])]
-          (is (:valid? result)))))
+                      (assoc-in [:zones :played-stack] [(cards/make-card :clubs "8")]))
+            result (validation/validate-play state 1
+                                             [(cards/make-card :hearts "8") (cards/make-card :hearts "5")])]
+        (is (:valid? result))))
 
     (testing "Q + non-matching answer card is rejected"
       (let [state (-> base-state
@@ -413,5 +413,5 @@
                          :hands {1 [(cards/make-card :clubs "J")]
                                  2 [(cards/make-card :diamonds "5")]}}
                  :effects [{:type :suit-selected :suit :diamonds}]}]
-      (let [result (validation/validate-play state 1 [(cards/make-card :clubs "J")])]
-        (is (not (:valid? result)) "With action-suit set, suit must match")))))
+    (is (not (:valid? (validation/validate-play state 1 [(cards/make-card :clubs "J")])))
+        "With action-suit set, suit must match"))))

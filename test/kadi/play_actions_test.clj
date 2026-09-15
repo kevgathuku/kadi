@@ -4,7 +4,6 @@
             [kadi.handlers :as handlers]
             [kadi.db :as db]
             [kadi.game :as game]
-            [kadi.server :as server]
             [ring.middleware.params :refer [wrap-params]]
             [ring.middleware.keyword-params :refer [wrap-keyword-params]]
             [next.jdbc :as jdbc]))

@@ -49,7 +49,7 @@
 
   (testing "authenticated access returns 200"
     (let [code "XYZ789"
-          game (make-game-with-code code)
+          _ (make-game-with-code code)
           suffix (str (System/currentTimeMillis))
           player (db/create-player! {:name (str "alice" (subs suffix (- (count suffix) 5)))
                                       :email (str "alice" suffix "@example.com")})
