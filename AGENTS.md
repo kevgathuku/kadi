@@ -231,7 +231,13 @@ See `docs/CLOJURE_BOOTSTRAP_BRIEF.md` for complete rules.
 
 ## Testing Strategy
 
-Tests are pure - no database setup required:
+Tests that touch the database must use an isolated fixture-local file
+(`test-<namespace>.db` with `:each` setup/teardown that deletes,
+re-initialises, and removes it — see `test/kadi/db_test.clj`), never the
+dev `kadi.db`. Pure namespaces need no setup; stub DB access with
+`with-redefs` where possible.
+
+Pure game-logic tests need no database setup:
 
 ```clojure
 (deftest play-king-reverses-direction
