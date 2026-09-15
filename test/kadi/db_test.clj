@@ -403,7 +403,38 @@
                (dissoc cached :meta))
             "replay with explicit count matches cache"))))
 
-  (deftest stale-cache-refresh-never-regresses-test
+  (deftest backfill-start-game-zones-test
+  (testing "legacy :start-game event (no deal stored) is backfilled from a fresh live cache"
+    (let [ts (java.time.Instant/parse "2026-01-01T00:00:00Z")
+          p1 {:id 1 :name "alice"}
+          p2 {:id 2 :name "bob"}
+          {:keys [id short-code]} (db/create-game! {:player p1 :timestamp ts})
+          _ (db/append-event! id "e-join" :join-game ts {:player p2 :timestamp ts})
+          ;; Snapshot the lobby state first: the legacy row below would
+          ;; otherwise make get-game-by-code rebuild a random live deal.
+          lobby-state (:state (db/get-game-by-code short-code))
+          ;; Insert a legacy-shaped start event directly, bypassing enrichment.
+          _ (jdbc/execute! (db/datasource)
+                           ["INSERT INTO game_events (game_id, sequence_number, event_id, event_type, event_data, timestamp) VALUES (?, 3, ?, ?, ?, ?)"
+                            id "e-start-legacy" "start-game" (db/->json {:timestamp (str ts)}) (str ts)])
+          ;; Simulate the true append-time cache: a known live deal at seq 3.
+          deck (cards/make-deck)
+          starting (cards/select-starting-card deck)
+          live-state (:ok (game/start-game-cmd lobby-state
+                                                :cards-per-player 4 :deck deck :starting-card starting))
+          _ (db/update-game-cache! id live-state 3)
+          _ (db/backfill-start-game-zones!)
+          events (db/get-events id)
+          start-event (first (filter #(= "start-game" (:event_type %)) events))]
+      (is (some? (:zones (:event_data start-event))) "backfill stores the cached deal in the event")
+      (let [no-meta #(dissoc % :meta)
+            a (no-meta (schema/normalize-game (db/rebuild-state-from-events id)))
+            b (no-meta (schema/normalize-game (db/rebuild-state-from-events id)))
+            cached (no-meta (get-in (db/get-game-by-code short-code) [:state]))]
+        (is (= a b) "replays are identical after backfill")
+        (is (= a cached) "replay equals the true cached deal after backfill")))))
+
+(deftest stale-cache-refresh-never-regresses-test
     (testing "stale refresh must not overwrite newer cache (CAS)"
       (let [ts (java.time.Instant/parse "2026-01-01T00:00:00Z")
             p1 {:id 1 :name "alice"}

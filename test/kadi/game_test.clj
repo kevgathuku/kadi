@@ -1471,6 +1471,24 @@
       (is (= (dissoc via-apply :meta) (dissoc via-cmd :meta))
           "cmd and apply-action produce identical states for identical input"))))
 
+(deftest start-game-zones-verbatim-test
+  (testing "apply-action :start-game with stored :zones reuses them exactly"
+    (let [ts (java.time.Instant/parse "2026-01-01T00:00:00Z")
+          base (-> (game/new-game "TEST")
+                   (#(:ok (game/join-player % {:id 1 :name "Alice"})))
+                   (#(:ok (game/join-player % {:id 2 :name "Bob"}))))
+          zones {:deck [{:suit :spades :rank "10"}]
+                 :played-stack [{:suit :hearts :rank "7"}]
+                 :hands {1 [{:suit :hearts :rank "5"}] 2 [{:suit :clubs :rank "9"}]}}
+          result (game/apply-action base {:type :start-game
+                                          :zones zones
+                                          :timestamp ts})]
+      (is (= :live (:status result)))
+      (is (= [{:suit :hearts :rank "7"}] (get-in result [:zones :played-stack])))
+      (is (= [{:suit :hearts :rank "5"}] (game/get-hand result 1)))
+      (is (= [{:suit :clubs :rank "9"}] (game/get-hand result 2)))
+      (is (= [{:suit :spades :rank "10"}] (get-in result [:zones :deck]))))))
+
 (deftest migrated-cmd-error-branches-test
   (testing "draw-card during penalty must accept first"
     (let [game (-> (make-test-game)

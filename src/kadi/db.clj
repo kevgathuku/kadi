@@ -106,6 +106,39 @@
             (swap! seen conj lower)))))
     (catch Exception _ nil)))
 
+(defn backfill-start-game-zones!
+  "Persist the cached deal into legacy :start-game events that carry no
+   deal. Only exact cases are backfilled: the start event must be the
+   game's latest event and the cache must be live at that sequence, so
+   the cached zones ARE the post-start deal. Games with later plays keep
+   a faithful cache while fresh; their original deal is unrecoverable.
+   Idempotent: events already carrying a deck or zones are skipped."
+  []
+  (let [ds (datasource)
+        starts (jdbc/execute! ds
+                              ["SELECT id, game_id, sequence_number, event_data FROM game_events WHERE event_type = 'start-game'"]
+                              {:builder-fn rs/as-unqualified-lower-maps})]
+    (doseq [{:keys [id game_id sequence_number event_data]} starts
+            :let [data (<-json event_data)]
+            :when (and (nil? (:deck data)) (nil? (:zones data)))]
+      (let [row (jdbc/execute-one! ds
+                                   ["SELECT state, state_sequence FROM games WHERE id = ?" game_id]
+                                   {:builder-fn rs/as-unqualified-lower-maps})
+            latest (:seq (jdbc/execute-one! ds
+                                            ["SELECT MAX(sequence_number) as seq FROM game_events WHERE game_id = ?" game_id]
+                                            {:builder-fn rs/as-unqualified-lower-maps}))
+            state (when (:state row) (schema/normalize-game (<-json (:state row))))]
+        ;; Sound only when nothing happened after the start: latest event
+        ;; is this start, and the live cache tracks exactly it.
+        (when (and (= sequence_number latest)
+                   (= (:state_sequence row) latest)
+                   (= :live (game/game-status state))
+                   (seq (get-in state [:zones :played-stack])))
+          (jdbc/execute-one! ds
+                             ["UPDATE game_events SET event_data = ? WHERE id = ?"
+                              (->json (assoc data :zones (get state :zones)))
+                              id]))))))
+
 (defn init!
   "Initialize the database with schema and pragmas."
   []
@@ -128,7 +161,9 @@
         (jdbc/execute! ds [stmt]))
       (ensure-unique-player-names! ds)
       (doseq [stmt indexes]
-        (jdbc/execute! ds [stmt])))))
+        (jdbc/execute! ds [stmt]))
+      ;; Pin down legacy :start-game deals so event replay stays faithful.
+      (backfill-start-game-zones!))))
 
 ;; =============================================================================
 ;; Event Sourcing

@@ -608,17 +608,29 @@
   (cond-> (add-player-metadata state player)
     timestamp (update-in [:meta :updated-at] (constantly timestamp))))
 
-(defmethod apply-action :start-game [state {:keys [timestamp cards-per-player deck starting-card]}]
-  ;; The event carries the deal (persisted at append time) so every replay
-  ;; deals identical hands; legacy events without a deck fall back to a
-  ;; fresh shuffle. Normalize the stored cards (suits arrive as strings
-  ;; after the JSON roundtrip).
-  (let [deck (when deck (vec (schema/normalize-cards deck)))
-        starting-card (when starting-card (first (schema/normalize-cards [starting-card])))]
-    (cond-> (start-game state {:cards-per-player (or cards-per-player 4)
-                               :deck deck
-                               :starting-card starting-card})
-      timestamp (update-in [:meta :updated-at] (constantly timestamp)))))
+(defmethod apply-action :start-game [state {:keys [timestamp cards-per-player deck starting-card zones]}]
+  ;; The event carries the deal so every replay is identical: :zones
+  ;; (backfilled legacy deals) win verbatim, else the persisted :deck is
+  ;; dealt. Legacy events with neither fall back to a fresh shuffle —
+  ;; deterministic replay is impossible for those (original deal lost),
+  ;; so prefer the cache for such games and backfill where sound.
+  ;; Normalize stored cards (suits arrive as strings after JSON roundtrip).
+  (if zones
+    (let [normalize-zone-cards (fn [cards] (vec (schema/normalize-cards cards)))
+          hands (into {} (map (fn [[pid hand]] [pid (normalize-zone-cards hand)]))
+                      (:hands zones))]
+      (cond-> (-> state
+                  (assoc :status :live)
+                  (assoc-in [:zones :deck] (normalize-zone-cards (:deck zones)))
+                  (assoc-in [:zones :played-stack] (normalize-zone-cards (:played-stack zones)))
+                  (assoc-in [:zones :hands] hands))
+        timestamp (update-in [:meta :updated-at] (constantly timestamp))))
+    (let [deck (when deck (vec (schema/normalize-cards deck)))
+          starting-card (when starting-card (first (schema/normalize-cards [starting-card])))]
+      (cond-> (start-game state {:cards-per-player (or cards-per-player 4)
+                                 :deck deck
+                                 :starting-card starting-card})
+        timestamp (update-in [:meta :updated-at] (constantly timestamp))))))
 
 (defmethod apply-action :play-cards [state {:keys [player-id cards declare-kadi? timestamp]}]
   (let [normalized-cards (schema/normalize-cards cards)
