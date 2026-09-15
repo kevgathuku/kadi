@@ -395,6 +395,42 @@
         (is (= 2 (:state_sequence raw))
             "stale write with older sequence must not regress the cache")))))
 
+(deftest stale-expected-seq-rejected-test
+  (testing "append with a stale expected-seq must be rejected"
+    (let [ts (java.time.Instant/parse "2026-01-01T00:00:00Z")
+          p1 {:id 1 :name "alice"}
+          p2 {:id 2 :name "bob"}
+          {:keys [id short-code]} (db/create-game! {:player p1 :timestamp ts})
+          _ (db/append-event! id "e-join" :join-game ts {:player p2 :timestamp ts})
+          _ (db/append-event! id "e-start" :start-game ts {:timestamp ts})
+          game (db/get-game-by-code short-code)
+          state (:state game)
+          stale-seq (:state_sequence game)
+          p1-id (:id p1)
+          _ (is (= p1-id (game/current-player-id state)) "P1 starts")
+          _ (is (:ok (game/validate-draw state p1-id)) "draw validates against fresh state")
+          hand-before (count (game/get-hand state p1-id))
+          ;; First draw with the fresh seq succeeds.
+          _ (db/append-event! id "e-draw-1" :draw-card ts
+                              {:player-id p1-id :maintain-kadi? false :timestamp ts}
+                              stale-seq)
+          ;; Second draw was ALSO validated against the same stale state
+          ;; (still P1's turn there). With a stale expected-seq it must be
+          ;; rejected instead of letting P1 draw twice.
+          _ (is (:ok (game/validate-draw state p1-id)) "stale validation still says :ok")
+          _ (is (thrown? clojure.lang.ExceptionInfo
+                         (db/append-event! id "e-draw-2" :draw-card ts
+                                           {:player-id p1-id :maintain-kadi? false :timestamp ts}
+                                           stale-seq))
+                "stale second draw is rejected")]
+      (let [after (db/get-game-by-code short-code)
+            state-after (:state after)]
+        (is (= (inc hand-before) (count (game/get-hand state-after p1-id)))
+            "P1 drew exactly once")
+        (is (= (:id p2) (game/current-player-id state-after))
+            "turn advanced to P2 exactly once")
+        (is (= 4 (:state_sequence after)) "no second event persisted")))))
+
 (deftest parallel-append-test
   (testing "concurrent appends across and within games stay consistent"
     (let [ts "2026-01-01T00:00:00Z"

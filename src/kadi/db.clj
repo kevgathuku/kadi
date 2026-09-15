@@ -201,13 +201,21 @@
 
 (defn append-event!
   "Append an event to a game's event log and advance the cached state,
-   atomically. Sole writer of both: readers never see a stale cache.
+   atomically. Stale readers may also refresh the cache, but only
+   forward (compare-and-set on state_sequence), so readers never
+   regress the cache.
    If event_id already exists, returns the existing event without
-   touching the cache (idempotent)."
-  [game-id event-id event-type timestamp event-data]
-  (when (nil? game-id)
-    (throw (Exception. "game-id cannot be nil in append-event!")))
-  (let [ds (datasource)]
+   touching the cache (idempotent).
+   When expected-seq is given, the append is rejected with an
+   ex-info (:reason :stale-state) unless the log still ends at
+   expected-seq — optimistic concurrency so a command validated
+   against stale state cannot silently apply to newer state."
+  ([game-id event-id event-type timestamp event-data]
+   (append-event! game-id event-id event-type timestamp event-data nil))
+  ([game-id event-id event-type timestamp event-data expected-seq]
+   (when (nil? game-id)
+     (throw (Exception. "game-id cannot be nil in append-event!")))
+   (let [ds (datasource)]
     (with-write-txn ds
       (fn [tx]
         (let [existing (jdbc/execute-one! tx
@@ -223,6 +231,14 @@
                                                         ["SELECT COALESCE(MAX(sequence_number), 0) + 1 as seq FROM game_events WHERE game_id = ?" game-id]
                                                         {:builder-fn rs/as-unqualified-lower-maps}))
                                1)
+                  ;; Optimistic concurrency: the caller validated its command
+                  ;; against expected-seq. Inside the write lock the log still
+                  ;; has to end there, else a concurrent writer got in first.
+                  _ (when (and (some? expected-seq) (not= (dec next-seq) expected-seq))
+                      (throw (ex-info "Stale game state: event log advanced since validation"
+                                      {:reason :stale-state
+                                       :expected expected-seq
+                                       :actual (dec next-seq)})))
                   base-state (fresh-state-tx tx game-id)
                   _ (jdbc/execute-one! tx
                                        ["INSERT INTO game_events (game_id, sequence_number, event_id, event_type, event_data, timestamp) VALUES (?, ?, ?, ?, ?, ?)"
@@ -234,7 +250,7 @@
               (jdbc/execute-one! tx
                                  ["UPDATE games SET state = ?, state_sequence = ?, updated_at = datetime('now') WHERE id = ?"
                                   (->json normalized) next-seq game-id])
-              {:sequence_number next-seq :event_type event-type :event_data event-data})))))))
+              {:sequence_number next-seq :event_type event-type :event_data event-data}))))))))
 
 ;; =============================================================================
 ;; Game Operations
