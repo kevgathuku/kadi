@@ -2,6 +2,7 @@
   "HTML views using Hiccup."
   (:require [hiccup2.core :as h]
             [hiccup.util :refer [raw-string]]
+            [clojure.string :as str]
             [kadi.cards :as cards]
             [kadi.game :as game]))
 
