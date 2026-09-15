@@ -165,9 +165,10 @@
        :body (views/players-list-fragment {:players (get-in game [:state :players])})}
       {:status 404 :body "Game not found"})))
 
-(defn get-lobby-status-fragment [request]
+(defn get-lobby-status-fragment
   "HTMX endpoint for refreshing lobby status - includes player list and action buttons.
    When the game has started, responds with HX-Redirect to send players to the game page."
+  [request]
   (let [short-code (get-in request [:path-params :code])
         player (auth/current-player request)]
     (if-let [game (db/get-game-by-code short-code)]
@@ -179,8 +180,9 @@
          :body (views/lobby-status-fragment {:player player :game game})})
       {:status 404 :body "Game not found"})))
 
-(defn get-game-state-fragment [request]
+(defn get-game-state-fragment
   "HTMX endpoint for polling game state updates - returns game-play-content fragment."
+  [request]
   (let [short-code (get-in request [:path-params :code])
         player (auth/current-player request)]
     (if-let [game (db/get-game-by-code short-code)]
@@ -213,13 +215,15 @@
         (redirect "/games" {:type :error :message "Game not found"})))
     (redirect "/auth/signin")))
 
-(defn join-page [request]
+(defn join-page
   "Display the join game page with code input."
+  [request]
   (let [player (auth/current-player request)]
     (html-response (views/join-page {:player player :flash (:flash request)}))))
 
-(defn join-game-by-code [request]
+(defn join-game-by-code
   "Join a game by short code from the join form."
+  [request]
   (if-let [player (auth/current-player request)]
     (let [short-code (clojure.string/upper-case (clojure.string/trim (get-in request [:params :code] "")))
           game (when (seq short-code) (db/get-game-by-code short-code))]
@@ -275,7 +279,7 @@
                 ;; Use ordered-cards parameter which preserves selection order
                 ordered-cards-str (get params "ordered-cards")
                 card-ids (if (and ordered-cards-str (not= ordered-cards-str ""))
-                           (clojure.string/split ordered-cards-str #",")
+                           (str/split ordered-cards-str #",")
                            [])
                 parsed-cards (keep cards/id->card card-ids)
                 ;; Parse declare-kadi checkbox (will be "on" if checked)
