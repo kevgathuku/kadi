@@ -1,8 +1,7 @@
 (ns kadi.schema
   "Malli schemas for domain objects with normalization/coercion."
   (:require [malli.core :as m]
-            [malli.transform :as mt]
-            [malli.util :as mu]))
+            [malli.transform :as mt]))
 
 ;; =============================================================================
 ;; Custom Transformers

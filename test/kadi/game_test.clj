@@ -1,5 +1,6 @@
 (ns kadi.game-test
   (:require [clojure.test :refer [deftest testing is]]
+            [clojure.string :as str]
             [kadi.game :as game]
             [kadi.cards :as cards]
             [kadi.schema :as schema]
@@ -246,15 +247,15 @@
   (testing "not your turn"
     (let [game (make-test-game)
           card {:suit :hearts :rank "5"}
-          game (give-card game 2 card)]
-      (is (:error (game/play-cards-cmd game 2 [card])))))
+          game-with-card (give-card game 2 card)]
+      (is (:error (game/play-cards-cmd game-with-card 2 [card])))))
 
   (testing "card doesn't match"
     (let [game (-> (make-test-game)
                    (set-top-card {:suit :hearts :rank "5"}))
           card {:suit :clubs :rank "9"}
-          game (give-card game 1 card)]
-      (is (:error (game/play-cards-cmd game 1 [card]))))))
+          game-with-card (give-card game 1 card)]
+      (is (:error (game/play-cards-cmd game-with-card 1 [card]))))))
 
 (deftest draw-card-cmd-test
   (testing "successful draw"
@@ -1058,6 +1059,108 @@
       (is (= :finished (:status final-state)) "Game should be finished")
       (is (= 1 (:winner final-state)) "Player 1 should be the winner")))
 
+  (testing "valid Q + regular answer finish with Kadi declaration"
+    (let [game (-> (make-test-game)
+                   (clear-hand 1)
+                   (give-card 1 {:suit :hearts :rank "Q"})
+                   (give-card 1 {:suit :hearts :rank "5"})
+                   (set-top-card {:suit :hearts :rank "7"}))
+          result (game/play-cards-cmd game 1 [{:suit :hearts :rank "Q"}
+                                              {:suit :hearts :rank "5"}]
+                                      :declare-kadi? true)
+          final-state (:ok result)]
+      (is (not (:error result)) "Q + answer play should succeed")
+      (is (= :finished (:status final-state)) "Game should be finished on answered Q")
+      (is (= 1 (:winner final-state)) "Player 1 should be the winner")
+      (is (empty? (game/get-hand final-state 1)) "Hand should be empty")))
+
+  (testing "valid 8 + regular answer finish with Kadi declaration"
+    (let [game (-> (make-test-game)
+                   (clear-hand 1)
+                   (give-card 1 {:suit :hearts :rank "8"})
+                   (give-card 1 {:suit :hearts :rank "5"})
+                   (set-top-card {:suit :hearts :rank "7"}))
+          result (game/play-cards-cmd game 1 [{:suit :hearts :rank "8"}
+                                              {:suit :hearts :rank "5"}]
+                                      :declare-kadi? true)
+          final-state (:ok result)]
+      (is (not (:error result)) "8 + answer play should succeed")
+      (is (= :finished (:status final-state)) "Game should be finished on answered 8")
+      (is (= 1 (:winner final-state)) "Player 1 should be the winner")))
+
+  (testing "valid Q + 8 + regular answer finish with Kadi declaration"
+    (let [game (-> (make-test-game)
+                   (clear-hand 1)
+                   (give-card 1 {:suit :hearts :rank "Q"})
+                   (give-card 1 {:suit :hearts :rank "8"})
+                   (give-card 1 {:suit :hearts :rank "5"})
+                   (set-top-card {:suit :hearts :rank "7"}))
+          result (game/play-cards-cmd game 1 [{:suit :hearts :rank "Q"}
+                                              {:suit :hearts :rank "8"}
+                                              {:suit :hearts :rank "5"}]
+                                      :declare-kadi? true)
+          final-state (:ok result)]
+      (is (not (:error result)) "Q + 8 + answer play should succeed")
+      (is (= :finished (:status final-state)) "Game should be finished")
+      (is (= 1 (:winner final-state)) "Player 1 should be the winner")))
+
+  (testing "invalid finish with Q alone (unanswered) becomes cardless"
+    (let [game (-> (make-test-game)
+                   (clear-hand 1)
+                   (give-card 1 {:suit :hearts :rank "Q"})
+                   (set-top-card {:suit :hearts :rank "7"}))
+          result (game/play-cards-cmd game 1 [{:suit :hearts :rank "Q"}] :declare-kadi? true)
+          final-state (:ok result)
+          player (game/get-player final-state 1)]
+      (is (not (:error result)) "Unanswered Q play should succeed")
+      (is (= :cardless (:status player)) "Player should become cardless, not win")
+      (is (not= :finished (:status final-state)) "Game should not be finished")
+      (is (game/has-effect? final-state :awaiting-answer) "Question effect still active")))
+
+  (testing "invalid finish with 8 alone (unanswered) becomes cardless"
+    (let [game (-> (make-test-game)
+                   (clear-hand 1)
+                   (give-card 1 {:suit :hearts :rank "8"})
+                   (set-top-card {:suit :hearts :rank "7"}))
+          result (game/play-cards-cmd game 1 [{:suit :hearts :rank "8"}] :declare-kadi? true)
+          final-state (:ok result)
+          player (game/get-player final-state 1)]
+      (is (not (:error result)) "Unanswered 8 play should succeed")
+      (is (= :cardless (:status player)) "Player should become cardless, not win")
+      (is (not= :finished (:status final-state)) "Game should not be finished")))
+
+  (testing "invalid finish with Q + action card answer (2 penalty) becomes cardless"
+    (let [game (-> (make-test-game)
+                   (clear-hand 1)
+                   (give-card 1 {:suit :hearts :rank "Q"})
+                   (give-card 1 {:suit :hearts :rank "2"})
+                   (set-top-card {:suit :hearts :rank "7"}))
+          result (game/play-cards-cmd game 1 [{:suit :hearts :rank "Q"}
+                                              {:suit :hearts :rank "2"}]
+                                      :declare-kadi? true)
+          final-state (:ok result)
+          player (game/get-player final-state 1)]
+      (is (not (:error result)) "Q + 2 play should succeed")
+      (is (= :cardless (:status player)) "Ending on a 2 triggers cardless")
+      (is (not= :finished (:status final-state)) "Game should not be finished")
+      (is (game/has-effect? final-state :penalty) "Penalty effect created on next player")))
+
+  (testing "invalid finish with Q + King answer becomes cardless"
+    (let [game (-> (make-test-game)
+                   (clear-hand 1)
+                   (give-card 1 {:suit :hearts :rank "Q"})
+                   (give-card 1 {:suit :hearts :rank "K"})
+                   (set-top-card {:suit :hearts :rank "7"}))
+          result (game/play-cards-cmd game 1 [{:suit :hearts :rank "Q"}
+                                              {:suit :hearts :rank "K"}]
+                                      :declare-kadi? true)
+          final-state (:ok result)
+          player (game/get-player final-state 1)]
+      (is (not (:error result)) "Q + K play should succeed")
+      (is (= :cardless (:status player)) "Ending on a King triggers cardless")
+      (is (not= :finished (:status final-state)) "Game should not be finished")
+      (is (= :counter-clockwise (:direction final-state)) "Direction reversed")))
+
   (testing "invalid finish with King as last card becomes cardless"
     (let [game (-> (make-test-game)
                    (clear-hand 1)
@@ -1272,3 +1375,264 @@
           result (game/draw-card-cmd game 1)]
       (is (:error result) "Cardless player should not be able to draw when penalty is active")
       (is (= "Must accept penalty first" (:error result))))))
+
+;; =============================================================================
+;; Write-path parity (candidate 1 pilot)
+;; =============================================================================
+
+(deftest play-cards-cmd-apply-parity-test
+  (testing "cmd and apply-action produce identical states for identical input"
+    (let [card {:suit :hearts :rank "5"}
+          state (-> (make-test-game)
+                    (clear-hand 1)
+                    (give-card 1 card)
+                    (set-top-card {:suit :hearts :rank "9"}))
+          via-cmd (:ok (game/play-cards-cmd state 1 [card]))
+          via-apply (game/apply-action state {:type :play-cards
+                                              :player-id 1
+                                              :cards [card]
+                                              :declare-kadi? false
+                                              :timestamp (java.time.Instant/parse "2026-01-01T00:00:00Z")})]
+      (is (some? via-cmd) "cmd should succeed")
+      (is (= (dissoc via-apply :meta) (dissoc via-cmd :meta))
+          "states should match apart from :meta/updated-at timestamps"))))
+
+(deftest normalize-cards-idempotent-test
+  (testing "normalize-cards is a no-op on handler-parsed cards"
+    (let [parsed (cards/id->card "5-hearts")]
+      (is (= {:suit :hearts :rank "5"} parsed))
+      (is (= [parsed] (vec (schema/normalize-cards [parsed])))))))
+
+(deftest all-actions-cmd-apply-parity-test
+  (testing "every cmd delegates to its apply-action method: identical states"
+    (let [ts (java.time.Instant/parse "2026-01-01T00:00:00Z")
+          no-meta #(dissoc % :meta)]
+      (testing "draw-card"
+        (let [state (make-test-game)
+              via-cmd (:ok (game/draw-card-cmd state 1))
+              via-apply (game/apply-action state {:type :draw-card :player-id 1
+                                                  :maintain-kadi? false :timestamp ts})]
+          (is (some? via-cmd))
+          (is (= (no-meta via-apply) (no-meta via-cmd)))))
+      (testing "select-suit"
+        (let [state (-> (make-test-game)
+                        (update :effects conj {:type :select-suit}))
+              via-cmd (:ok (game/select-suit-cmd state :hearts))
+              via-apply (game/apply-action state {:type :select-suit :suit :hearts
+                                                  :timestamp ts})]
+          (is (some? via-cmd))
+          (is (= (no-meta via-apply) (no-meta via-cmd)))))
+      (testing "accept-penalty"
+        (let [state (-> (make-test-game)
+                        (update :effects conj {:type :penalty :penalty-type :two}))
+              via-cmd (:ok (game/accept-penalty-cmd state 1))
+              via-apply (game/apply-action state {:type :accept-penalty :player-id 1
+                                                  :timestamp ts})]
+          (is (some? via-cmd))
+          (is (= (no-meta via-apply) (no-meta via-cmd)))))
+      (testing "answer-question"
+        (let [state (-> (make-test-game)
+                        (update :effects conj {:type :awaiting-answer}))
+              via-cmd (:ok (game/answer-question-cmd state 1))
+              via-apply (game/apply-action state {:type :answer-question :player-id 1
+                                                  :timestamp ts})]
+          (is (some? via-cmd))
+          (is (= (no-meta via-apply) (no-meta via-cmd)))))
+      (testing "play-cards while kadi declared still matches"
+        (let [card {:suit :hearts :rank "5"}
+              state (-> (make-test-game)
+                        (clear-hand 1)
+                        (give-card 1 card)
+                        (set-top-card {:suit :hearts :rank "9"})
+                        (game/update-player 1 #(assoc % :status :kadi)))
+              via-cmd (:ok (game/play-cards-cmd state 1 [card]))
+              via-apply (game/apply-action state {:type :play-cards :player-id 1
+                                                  :cards [card] :declare-kadi? false
+                                                  :timestamp ts})]
+          (is (some? via-cmd))
+          (is (= (no-meta via-apply) (no-meta via-cmd))))))))
+
+(deftest start-game-cmd-apply-parity-test
+  (testing "start-game-cmd delegates to apply-action, preserving cards-per-player"
+    (let [ts (java.time.Instant/parse "2026-01-01T00:00:00Z")
+          base (-> (game/new-game "TEST")
+                   (#(:ok (game/join-player % {:id 1 :name "Alice"})))
+                   (#(:ok (game/join-player % {:id 2 :name "Bob"}))))
+          deck (cards/make-deck)
+          starting (cards/select-starting-card deck)
+          via-cmd (:ok (game/start-game-cmd base :cards-per-player 2 :deck deck :starting-card starting))
+          via-apply (game/apply-action base {:type :start-game
+                                             :cards-per-player 2
+                                             :deck deck
+                                             :starting-card starting
+                                             :timestamp ts})]
+      (is (some? via-cmd) "cmd should succeed")
+      (is (= 2 (count (game/get-hand via-cmd 1))) "cmd deals non-default count")
+      (is (= (dissoc via-apply :meta) (dissoc via-cmd :meta))
+          "cmd and apply-action produce identical states for identical input"))))
+
+(deftest start-game-zones-verbatim-test
+  (testing "apply-action :start-game with stored :zones reuses them exactly"
+    (let [ts (java.time.Instant/parse "2026-01-01T00:00:00Z")
+          base (-> (game/new-game "TEST")
+                   (#(:ok (game/join-player % {:id 1 :name "Alice"})))
+                   (#(:ok (game/join-player % {:id 2 :name "Bob"}))))
+          zones {:deck [{:suit :spades :rank "10"}]
+                 :played-stack [{:suit :hearts :rank "7"}]
+                 :hands {1 [{:suit :hearts :rank "5"}] 2 [{:suit :clubs :rank "9"}]}}
+          result (game/apply-action base {:type :start-game
+                                          :zones zones
+                                          :timestamp ts})]
+      (is (= :live (:status result)))
+      (is (= [{:suit :hearts :rank "7"}] (get-in result [:zones :played-stack])))
+      (is (= [{:suit :hearts :rank "5"}] (game/get-hand result 1)))
+      (is (= [{:suit :clubs :rank "9"}] (game/get-hand result 2)))
+      (is (= [{:suit :spades :rank "10"}] (get-in result [:zones :deck]))))))
+
+(deftest migrated-cmd-error-branches-test
+  (testing "draw-card during penalty must accept first"
+    (let [game (-> (make-test-game)
+                   (update :effects conj {:type :penalty :penalty-type :two}))
+          result (game/draw-card-cmd game (game/current-player-id game))]
+      (is (:error result))
+      (is (= "Must accept penalty first" (:error result)))))
+
+  (testing "draw-card when game not live"
+    (let [game (-> (game/new-game "TEST")
+                   (game/add-player {:id 1 :name "Alice"})
+                   (game/add-player {:id 2 :name "Bob"}))]
+      (is (:error (game/draw-card-cmd game 1)))))
+
+  (testing "play-cards rejects unknown player and empty play"
+    (let [game (make-test-game)
+          card {:suit :hearts :rank "5"}
+          game-with-card (give-card game 1 card)]
+      (is (:error (game/play-cards-cmd game-with-card 99 [card]))
+          "Player not in game")
+      (is (:error (game/play-cards-cmd game-with-card 1 []))
+          "Must play at least one card")))
+
+  (testing "answer-question rejects wrong turn"
+    (let [game (-> (make-test-game)
+                   (update :effects conj {:type :awaiting-answer}))
+          other-id (:id (second (:players game)))]
+      (is (:error (game/answer-question-cmd game other-id)))))
+
+  (testing "accept-penalty when game not live"
+    (let [game (-> (make-test-game)
+                   (assoc :status :finished)
+                   (update :effects conj {:type :penalty :penalty-type :two}))]
+      (is (:error (game/accept-penalty-cmd game (game/current-player-id game))))))
+
+  (testing "select-suit accepts string suit via delegated normalization"
+    (let [game (-> (make-test-game)
+                   (update :effects conj {:type :select-suit}))
+          result (game/select-suit-cmd game "hearts")]
+      (is (:ok result) "String suit should normalize through the delegated path")
+      (is (game/has-effect? (:ok result) :suit-selected)))))
+
+(deftest accept-penalty-turn-test
+  (testing "only the penalized (current) player can accept, 3-player game"
+    (let [game (-> (make-3p-test-game)
+                   (clear-hand 1)
+                   (give-card 1 {:suit :hearts :rank "2"})
+                   (set-top-card {:suit :hearts :rank "9"}))
+          played (:ok (game/play-cards-cmd game 1 [{:suit :hearts :rank "2"}]))
+          _ (assert played "setup play should succeed")
+          penalized (game/current-player-id played)
+          hand-before (count (game/get-hand played penalized))]
+      (is (= 2 penalized) "Player 2 is penalized after player 1 plays a 2")
+      (is (:error (game/accept-penalty-cmd played 3))
+          "Player 3 (not current) must be rejected")
+      (let [result (:ok (game/accept-penalty-cmd played penalized))]
+        (is (some? result) "Penalized player accepts")
+        (is (= (+ hand-before 2) (count (game/get-hand result penalized)))
+            "Penalized player draws 2")
+        (is (not (game/has-effect? result :penalty)) "Penalty cleared")
+        (is (= 3 (game/current-player-id result)) "Turn advances to player 3")))))
+
+(deftest accept-penalty-direction-test
+  (testing "penalty follows turn direction, counter-clockwise leg"
+    (let [game (-> (make-3p-test-game)
+                   (game/reverse-direction)
+                   (clear-hand 1)
+                   (give-card 1 {:suit :hearts :rank "2"})
+                   (set-top-card {:suit :hearts :rank "9"}))
+          played (:ok (game/play-cards-cmd game 1 [{:suit :hearts :rank "2"}]))
+          _ (assert played "setup play should succeed")
+          penalized (game/current-player-id played)
+          hand-before (count (game/get-hand played penalized))]
+      (is (= :counter-clockwise (:direction played)))
+      (is (= 3 penalized) "Counter-clockwise from player 1 penalizes player 3")
+      (is (:error (game/accept-penalty-cmd played 2))
+          "Player 2 (not current) must be rejected")
+      (let [result (:ok (game/accept-penalty-cmd played penalized))]
+        (is (some? result) "Penalized player accepts")
+        (is (= (+ hand-before 2) (count (game/get-hand result penalized)))
+            "Penalized player draws 2")
+        (is (not (game/has-effect? result :penalty)) "Penalty cleared")
+        (is (= 2 (game/current-player-id result))
+            "Turn advances counter-clockwise to player 2")))))
+
+(deftest play-view-test
+  (testing "normal turn view-model"
+    (let [vm (game/play-view (make-test-game) 1)]
+      (is (true? (:my-turn? vm)))
+      (is (= :play (:mode vm)))
+      (is (= :none (get-in vm [:banner :kind])))
+      (is (false? (:penalty? vm)))
+      (is (false? (:poll? vm)))
+      (is (= "your turn" (:status-text (first (:players vm)))))))
+
+  (testing "waiting view-model polls"
+    (let [vm (game/play-view (make-test-game) 2)]
+      (is (false? (:my-turn? vm)))
+      (is (= :waiting (:mode vm)))
+      (is (true? (:poll? vm)))
+      (is (= "4 cards" (:status-text (second (:players vm)))))))
+
+  (testing "penalty banner"
+    (let [state (-> (make-test-game)
+                    (update :effects conj {:type :penalty :penalty-type :two}))
+          mine (game/play-view state 1)
+          theirs (game/play-view state 2)]
+      (is (= :penalty (get-in mine [:banner :kind])))
+      (is (= 2 (:penalty-draw-count mine)))
+      (is (true? (:penalty? mine)))
+      (is (str/includes? (get-in mine [:banner :text]) "Play two to block"))
+      (is (str/includes? (get-in theirs [:banner :text]) "Waiting for"))))
+
+  (testing "select-suit and suit-selected banners"
+    (let [selecting (-> (make-test-game)
+                        (update :effects conj {:type :select-suit}))
+          vm (game/play-view selecting 1)]
+      (is (= :select-suit (get-in vm [:banner :kind])))
+      (is (= :select-suit (:mode vm)))
+      (is (= "Ace played! Select a suit below." (get-in vm [:banner :text]))))
+    (let [selected (-> (make-test-game)
+                       (update :effects conj {:type :suit-selected :suit :hearts}))
+          vm (game/play-view selected 2)]
+      (is (= :suit-selected (get-in vm [:banner :kind])))
+      (is (= :hearts (get-in vm [:banner :suit])))))
+
+  (testing "awaiting-answer and cardless modes"
+    (let [vm (game/play-view (-> (make-test-game)
+                                  (update :effects conj {:type :awaiting-answer})) 1)]
+      (is (= :answer (:mode vm)))
+      (is (= :awaiting-answer (get-in vm [:banner :kind]))))
+    (let [vm (game/play-view (-> (make-test-game)
+                                  (game/update-player 1 #(assoc % :status :cardless))) 1)]
+      (is (= :cardless (:mode vm)))))
+
+  (testing "finished game names the winner"
+    (let [state (-> (make-test-game)
+                    (clear-hand 1)
+                    (give-card 1 {:suit :hearts :rank "5"})
+                    (set-top-card {:suit :hearts :rank "9"})
+                    (game/update-player 1 #(assoc % :status :kadi)))
+          played (:ok (game/play-cards-cmd state 1 [{:suit :hearts :rank "5"}]))
+          vm (game/play-view played 1)]
+      (is (= :finished (:mode vm)))
+      (is (true? (:finished? vm)))
+      (is (= "Alice" (:winner-name vm)))
+      (is (false? (:poll? vm))))))

@@ -3,14 +3,17 @@
   (:require [next.jdbc :as jdbc]
             [next.jdbc.result-set :as rs]
             [jsonista.core :as json]
+            [clojure.string :as str]
+            [kadi.cards :as cards]
             [kadi.game :as game]
             [kadi.schema :as schema]))
 
 (def ^:dynamic *db-spec* {:dbtype "sqlite" :dbname (or (System/getenv "DATABASE_PATH") "kadi.db")})
 
-(defn datasource []
+(defn datasource
   "Get or create a datasource for the current *db-spec*.
    Always reads *db-spec* so dynamic binding works correctly."
+  []
   (jdbc/get-datasource *db-spec*))
 
 (def ^:private json-mapper (json/object-mapper {:decode-key-fn keyword}))
@@ -91,17 +94,50 @@
                               {:builder-fn rs/as-unqualified-lower-maps})
           seen (atom #{})]
       (doseq [{:keys [id name]} (sort-by :id rows)]
-        (let [lower (clojure.string/lower-case (or name ""))]
+        (let [lower (str/lower-case (or name ""))]
           (if (contains? @seen lower)
             (loop [n 2]
               (let [candidate (str name n)
-                    candidate-lower (clojure.string/lower-case candidate)]
+                    candidate-lower (str/lower-case candidate)]
                 (if (contains? @seen candidate-lower)
                   (recur (inc n))
                   (do (jdbc/execute-one! ds ["UPDATE players SET name = ? WHERE id = ?" candidate id])
                       (swap! seen conj candidate-lower)))))
             (swap! seen conj lower)))))
     (catch Exception _ nil)))
+
+(defn backfill-start-game-zones!
+  "Persist the cached deal into legacy :start-game events that carry no
+   deal. Only exact cases are backfilled: the start event must be the
+   game's latest event and the cache must be live at that sequence, so
+   the cached zones ARE the post-start deal. Games with later plays keep
+   a faithful cache while fresh; their original deal is unrecoverable.
+   Idempotent: events already carrying a deck or zones are skipped."
+  []
+  (let [ds (datasource)
+        starts (jdbc/execute! ds
+                              ["SELECT id, game_id, sequence_number, event_data FROM game_events WHERE event_type = 'start-game'"]
+                              {:builder-fn rs/as-unqualified-lower-maps})]
+    (doseq [{:keys [id game_id sequence_number event_data]} starts
+            :let [data (<-json event_data)]
+            :when (and (nil? (:deck data)) (nil? (:zones data)))]
+      (let [row (jdbc/execute-one! ds
+                                   ["SELECT state, state_sequence FROM games WHERE id = ?" game_id]
+                                   {:builder-fn rs/as-unqualified-lower-maps})
+            latest (:seq (jdbc/execute-one! ds
+                                            ["SELECT MAX(sequence_number) as seq FROM game_events WHERE game_id = ?" game_id]
+                                            {:builder-fn rs/as-unqualified-lower-maps}))
+            state (when (:state row) (schema/normalize-game (<-json (:state row))))]
+        ;; Sound only when nothing happened after the start: latest event
+        ;; is this start, and the live cache tracks exactly it.
+        (when (and (= sequence_number latest)
+                   (= (:state_sequence row) latest)
+                   (= :live (game/game-status state))
+                   (seq (get-in state [:zones :played-stack])))
+          (jdbc/execute-one! ds
+                             ["UPDATE game_events SET event_data = ? WHERE id = ?"
+                              (->json (assoc data :zones (get state :zones)))
+                              id]))))))
 
 (defn init!
   "Initialize the database with schema and pragmas."
@@ -116,16 +152,18 @@
     (jdbc/execute! ds ["PRAGMA journal_mode=WAL"])
     ;; Create tables first, dedup legacy names, then indexes
     ;; (unique index on lower(name) fails on legacy duplicate names otherwise).
-    (let [stmts (->> (clojure.string/split schema #";")
-                     (map clojure.string/trim)
-                     (remove clojure.string/blank?))
+    (let [stmts (->> (str/split schema #";")
+                     (map str/trim)
+                     (remove str/blank?))
           {:keys [tables indexes]} (group-by #(if (re-find #"(?i)^CREATE\s+(UNIQUE\s+)?INDEX" %)
                                                 :indexes :tables) stmts)]
       (doseq [stmt tables]
         (jdbc/execute! ds [stmt]))
       (ensure-unique-player-names! ds)
       (doseq [stmt indexes]
-        (jdbc/execute! ds [stmt])))))
+        (jdbc/execute! ds [stmt]))
+      ;; Pin down legacy :start-game deals so event replay stays faithful.
+      (backfill-start-game-zones!))))
 
 ;; =============================================================================
 ;; Event Sourcing
@@ -159,33 +197,108 @@
             nil
             events)))
 
+(defn- with-write-txn
+  "Run f with a single SQLite connection inside BEGIN IMMEDIATE.
+   IMMEDIATE reserves the write lock up front so concurrent writers
+   queue instead of hitting upgrade deadlocks; busy_timeout makes them
+   wait rather than fail. f receives the connection; commit on success,
+   rollback on error."
+  [ds f]
+  (with-open [conn (jdbc/get-connection ds)]
+    (jdbc/execute! conn ["PRAGMA busy_timeout = 5000"])
+    (jdbc/execute! conn ["PRAGMA foreign_keys = ON"])
+    (jdbc/execute! conn ["BEGIN IMMEDIATE"])
+    (try
+      (let [result (f conn)]
+        (jdbc/execute! conn ["COMMIT"])
+        result)
+      (catch Exception e
+        (try (jdbc/execute! conn ["ROLLBACK"]) (catch Exception _ nil))
+        (throw e)))))
+
+(defn- fresh-state-tx
+  "Compute current state for game-id inside a write txn: use the cache
+   when it tracks the latest event, else rebuild from the log."
+  [tx game-id]
+  (let [row (jdbc/execute-one! tx
+                               ["SELECT state, state_sequence FROM games WHERE id = ?" game-id]
+                               {:builder-fn rs/as-unqualified-lower-maps})
+        latest (or (:seq (jdbc/execute-one! tx
+                                            ["SELECT MAX(sequence_number) as seq FROM game_events WHERE game_id = ?" game-id]
+                                            {:builder-fn rs/as-unqualified-lower-maps}))
+                   0)]
+    (if (and (:state row) (= (:state_sequence row) latest))
+      (schema/normalize-game (<-json (:state row)))
+      (reduce (fn [state {:keys [event_type event_data]}]
+                (game/apply-action state (merge event_data {:type (keyword event_type)})))
+              nil
+              (->> (jdbc/execute! tx
+                                  ["SELECT * FROM game_events WHERE game_id = ? ORDER BY sequence_number" game-id]
+                                  {:builder-fn rs/as-unqualified-lower-maps})
+                   (map #(update % :event_data <-json)))))))
+
 (defn append-event!
-  "Append an event to a game's event log with idempotency protection.
-   If event_id already exists, returns the existing event (idempotent).
-   Otherwise inserts and returns the new event with sequence_number."
-  [game-id event-id event-type timestamp event-data]
-  (when (nil? game-id)
-    (throw (Exception. "game-id cannot be nil in append-event!")))
-  (let [ds (datasource)
-        ;; Check if event_id already exists (idempotency)
-        existing (jdbc/execute-one! ds
-                                    ["SELECT sequence_number, event_type, event_data FROM game_events WHERE event_id = ?"
-                                     event-id]
-                                    {:builder-fn rs/as-unqualified-lower-maps})]
-    (if existing
-      ;; Event already exists, return it (idempotent)
-      (assoc existing :event_data (<-json (:event_data existing)))
-      ;; New event, insert it
-      (let [next-seq (or (:seq (jdbc/execute-one! ds
-                                                  ["SELECT COALESCE(MAX(sequence_number), 0) + 1 as seq FROM game_events WHERE game_id = ?" game-id]
-                                                  {:builder-fn rs/as-unqualified-lower-maps}))
-                         1)]
-        (jdbc/execute-one! ds
-                           ["INSERT INTO game_events (game_id, sequence_number, event_id, event_type, event_data, timestamp) VALUES (?, ?, ?, ?, ?, ?)"
-                            game-id next-seq event-id (name event-type) (->json event-data) (str timestamp)]
-                           {:return-keys true
-                            :builder-fn rs/as-unqualified-lower-maps})
-        {:sequence_number next-seq :event_type event-type :event_data event-data}))))
+  "Append an event to a game's event log and advance the cached state,
+   atomically. Stale readers may also refresh the cache, but only
+   forward (compare-and-set on state_sequence), so readers never
+   regress the cache.
+   If event_id already exists, returns the existing event without
+   touching the cache (idempotent).
+   When expected-seq is given, the append is rejected with an
+   ex-info (:reason :stale-state) unless the log still ends at
+   expected-seq — optimistic concurrency so a command validated
+   against stale state cannot silently apply to newer state."
+  ([game-id event-id event-type timestamp event-data]
+   (append-event! game-id event-id event-type timestamp event-data nil))
+  ([game-id event-id event-type timestamp event-data expected-seq]
+   (when (nil? game-id)
+     (throw (Exception. "game-id cannot be nil in append-event!")))
+   (let [ds (datasource)]
+     (with-write-txn ds
+       (fn [tx]
+         (let [existing (jdbc/execute-one! tx
+                                           ["SELECT sequence_number, event_type, event_data FROM game_events WHERE event_id = ?"
+                                            event-id]
+                                           {:builder-fn rs/as-unqualified-lower-maps})]
+           (if existing
+            ;; Event already exists, return it (idempotent)
+             (assoc existing :event_data (<-json (:event_data existing)))
+            ;; New event: compute base state first (cache tracks next-seq - 1
+            ;; at this point), then insert, apply, and write the cache.
+            ;; A :start-game event must carry its deal: shuffling here and
+            ;; storing the deck makes every later replay deterministic.
+            ;; Legacy callers send only {:timestamp}; enrich those.
+            (let [event-data (if (and (= :start-game event-type) (nil? (:deck event-data)))
+                               (let [deck (cards/make-deck)]
+                                 (assoc event-data
+                                        :deck deck
+                                        :starting-card (cards/select-starting-card deck)
+                                        :cards-per-player (or (:cards-per-player event-data) 4)))
+                               event-data)
+                  next-seq (or (:seq (jdbc/execute-one! tx
+                                                         ["SELECT COALESCE(MAX(sequence_number), 0) + 1 as seq FROM game_events WHERE game_id = ?" game-id]
+                                                         {:builder-fn rs/as-unqualified-lower-maps}))
+                                1)
+                  ;; Optimistic concurrency: the caller validated its command
+                  ;; against expected-seq. Inside the write lock the log still
+                  ;; has to end there, else a concurrent writer got in first.
+                   _ (when (and (some? expected-seq) (not= (dec next-seq) expected-seq))
+                       (throw (ex-info "Stale game state: event log advanced since validation"
+                                       {:reason :stale-state
+                                        :expected expected-seq
+                                        :actual (dec next-seq)})))
+                   base-state (fresh-state-tx tx game-id)
+                   _ (jdbc/execute-one! tx
+                                        ["INSERT INTO game_events (game_id, sequence_number, event_id, event_type, event_data, timestamp) VALUES (?, ?, ?, ?, ?, ?)"
+                                         game-id next-seq event-id (name event-type) (->json event-data) (str timestamp)]
+                                        {:return-keys true
+                                         :builder-fn rs/as-unqualified-lower-maps})
+                   new-state (game/apply-action base-state (merge event-data {:type event-type}))
+                   normalized (schema/normalize-game new-state)]
+               (jdbc/execute-one! tx
+                                  ["UPDATE games SET state = ?, state_sequence = ?, updated_at = datetime('now') WHERE id = ?"
+                                   (->json normalized) next-seq game-id])
+               {:sequence_number next-seq :event_type event-type :event_data event-data}))))))))
 
 ;; =============================================================================
 ;; Game Operations
@@ -200,14 +313,17 @@
       0))
 
 (defn update-game-cache!
-  "Update the denormalized game state cache with the sequence number of the last applied event.
-   The cached state is a materialized view derived from events for performance."
+  "Update the denormalized game state cache, but never backward.
+   Compare-and-set on state_sequence: a snapshot for an older sequence
+   can never overwrite a newer one (same-sequence rewrites, e.g. state
+   corrections, are still allowed)."
   [game-id game-state state-sequence]
   (jdbc/execute-one! (datasource)
-                     ["UPDATE games SET state = ?, state_sequence = ?, updated_at = datetime('now') WHERE id = ?"
+                     ["UPDATE games SET state = ?, state_sequence = ?, updated_at = datetime('now') WHERE id = ? AND state_sequence <= ?"
                       (->json game-state)
                       state-sequence
-                      game-id]))
+                      game-id
+                      state-sequence]))
 
 (defn- ensure-fresh-state
   "Check if game state is stale and rebuild from snapshot + subsequent events if needed.
@@ -229,7 +345,17 @@
                                   subsequent-events)
               normalized-state (schema/normalize-game fresh-state)]
           (update-game-cache! (:id game) normalized-state latest-seq)
-          (assoc game :state normalized-state :state_sequence latest-seq))
+          ;; A newer writer may have committed while we rebuilt; our CAS
+          ;; write is then a no-op. Re-read and prefer the newest snapshot
+          ;; so we never hand a caller state older than the cache.
+          (let [current (jdbc/execute-one! (datasource)
+                                           ["SELECT state, state_sequence FROM games WHERE id = ?" (:id game)]
+                                           {:builder-fn rs/as-unqualified-lower-maps})
+                current-seq (:state_sequence current)]
+            (if (and current-seq (> current-seq latest-seq))
+              (assoc game :state (schema/normalize-game (<-json (:state current)))
+                     :state_sequence current-seq)
+              (assoc game :state normalized-state :state_sequence latest-seq))))
         ;; State is fresh
         game))))
 
@@ -285,6 +411,13 @@
             (jdbc/execute-one! tx
                                ["INSERT OR IGNORE INTO game_players (game_id, player_id) VALUES (?, ?)"
                                 new-game-id player-id])
+            ;; Write the initial cache from the same event (sole-writer
+            ;; invariant: cache always tracks the last event)
+            (let [initial (-> (game/apply-action nil (assoc action-with-code :type :game-created))
+                              schema/normalize-game)]
+              (jdbc/execute-one! tx
+                                 ["UPDATE games SET state = ?, state_sequence = 1 WHERE id = ?"
+                                  (->json initial) new-game-id]))
             {:game-id new-game-id}))]
     {:id game-id :short-code short-code}))
 
