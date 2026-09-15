@@ -39,9 +39,9 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-clojure-
     
-    - name: Run tests
-      run: clojure -M:test
-
     - name: Lint (advisory, never fails the build)
       run: clojure -M:lint
       continue-on-error: true
+
+    - name: Run tests
+      run: clojure -M:test
