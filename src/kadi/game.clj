@@ -283,13 +283,13 @@
       (assoc ::skip-count (inc jack-count))
 
       ;; Question without answer
-      (and (every? cards/question-card? cards)
-           (not (empty? cards)))
+      (and (seq cards)
+           (every? cards/question-card? cards))
       (update :effects conj {:type :awaiting-answer}))))
 
 (defn maybe-advance-turn
   "Advance turn unless waiting for suit selection or question answer."
-  [state cards]
+  [state _cards]
   (let [skip-count (or (::skip-count state) 1)]
     (cond
       ;; Waiting for suit selection
@@ -315,8 +315,7 @@
      leaves no pending action, so it does not trigger cardless (allows normal finish)
    - Kadi declaration is optional, not required"
   [state player-id cards]
-  (let [player (get-player state player-id)
-        hand (get-hand state player-id)
+  (let [hand (get-hand state player-id)
         final-card (last cards)
         ;; Cards that trigger cardless: when the final card remaining on top is a special action card
         triggers-cardless? (contains? #{"K" "J" "2" "3" "A" "Q" "8"} (:rank final-card))]
