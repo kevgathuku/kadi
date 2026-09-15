@@ -374,6 +374,27 @@
       (let [row (db/get-game-by-code short-code)]
         (is (= 3 (:state_sequence row)) "cache tracks the last event")))))
 
+(deftest stale-cache-refresh-never-regresses-test
+  (testing "stale refresh must not overwrite newer cache (CAS)"
+    (let [ts (java.time.Instant/parse "2026-01-01T00:00:00Z")
+          p1 {:id 1 :name "alice"}
+          p2 {:id 2 :name "bob"}
+          {:keys [id short-code]} (db/create-game! {:player p1 :timestamp ts})
+          _ (db/append-event! id "e-join" :join-game ts {:player p2 :timestamp ts})
+          fresh (db/get-game-by-code short-code)
+          fresh-seq (:state_sequence fresh)
+          stale-state (db/rebuild-state-from-events id)]
+      (is (= 2 fresh-seq))
+      ;; Simulate a stale reader overwriting with an older snapshot:
+      ;; cache is at 2, stale write tries to push seq 1.
+      ;; Read the RAW row (get-game-by-code would self-heal and mask it).
+      (db/update-game-cache! id stale-state 1)
+      (let [raw (jdbc/execute-one! (db/datasource)
+                                   ["SELECT state_sequence FROM games WHERE id = ?" id]
+                                   {:builder-fn rs/as-unqualified-lower-maps})]
+        (is (= 2 (:state_sequence raw))
+            "stale write with older sequence must not regress the cache")))))
+
 (deftest parallel-append-test
   (testing "concurrent appends across and within games stay consistent"
     (let [ts "2026-01-01T00:00:00Z"

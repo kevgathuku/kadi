@@ -249,14 +249,17 @@
       0))
 
 (defn update-game-cache!
-  "Update the denormalized game state cache with the sequence number of the last applied event.
-   The cached state is a materialized view derived from events for performance."
+  "Update the denormalized game state cache, but never backward.
+   Compare-and-set on state_sequence: a snapshot for an older sequence
+   can never overwrite a newer one (same-sequence rewrites, e.g. state
+   corrections, are still allowed)."
   [game-id game-state state-sequence]
   (jdbc/execute-one! (datasource)
-                     ["UPDATE games SET state = ?, state_sequence = ?, updated_at = datetime('now') WHERE id = ?"
+                     ["UPDATE games SET state = ?, state_sequence = ?, updated_at = datetime('now') WHERE id = ? AND state_sequence <= ?"
                       (->json game-state)
                       state-sequence
-                      game-id]))
+                      game-id
+                      state-sequence]))
 
 (defn- ensure-fresh-state
   "Check if game state is stale and rebuild from snapshot + subsequent events if needed.
@@ -278,7 +281,17 @@
                                   subsequent-events)
               normalized-state (schema/normalize-game fresh-state)]
           (update-game-cache! (:id game) normalized-state latest-seq)
-          (assoc game :state normalized-state :state_sequence latest-seq))
+          ;; A newer writer may have committed while we rebuilt; our CAS
+          ;; write is then a no-op. Re-read and prefer the newest snapshot
+          ;; so we never hand a caller state older than the cache.
+          (let [current (jdbc/execute-one! (datasource)
+                                           ["SELECT state, state_sequence FROM games WHERE id = ?" (:id game)]
+                                           {:builder-fn rs/as-unqualified-lower-maps})
+                current-seq (:state_sequence current)]
+            (if (and current-seq (> current-seq latest-seq))
+              (assoc game :state (schema/normalize-game (<-json (:state current)))
+                     :state_sequence current-seq)
+              (assoc game :state normalized-state :state_sequence latest-seq))))
         ;; State is fresh
         game))))
 
