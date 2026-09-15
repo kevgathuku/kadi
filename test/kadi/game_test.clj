@@ -1,5 +1,6 @@
 (ns kadi.game-test
   (:require [clojure.test :refer [deftest testing is]]
+            [clojure.string :as str]
             [kadi.game :as game]
             [kadi.cards :as cards]
             [kadi.schema :as schema]
@@ -246,15 +247,15 @@
   (testing "not your turn"
     (let [game (make-test-game)
           card {:suit :hearts :rank "5"}
-          game (give-card game 2 card)]
-      (is (:error (game/play-cards-cmd game 2 [card])))))
+          game-with-card (give-card game 2 card)]
+      (is (:error (game/play-cards-cmd game-with-card 2 [card])))))
 
   (testing "card doesn't match"
     (let [game (-> (make-test-game)
                    (set-top-card {:suit :hearts :rank "5"}))
           card {:suit :clubs :rank "9"}
-          game (give-card game 1 card)]
-      (is (:error (game/play-cards-cmd game 1 [card]))))))
+          game-with-card (give-card game 1 card)]
+      (is (:error (game/play-cards-cmd game-with-card 1 [card]))))))
 
 (deftest draw-card-cmd-test
   (testing "successful draw"
@@ -1487,10 +1488,10 @@
   (testing "play-cards rejects unknown player and empty play"
     (let [game (make-test-game)
           card {:suit :hearts :rank "5"}
-          game (give-card game 1 card)]
-      (is (:error (game/play-cards-cmd game 99 [card]))
+          game-with-card (give-card game 1 card)]
+      (is (:error (game/play-cards-cmd game-with-card 99 [card]))
           "Player not in game")
-      (is (:error (game/play-cards-cmd game 1 []))
+      (is (:error (game/play-cards-cmd game-with-card 1 []))
           "Must play at least one card")))
 
   (testing "answer-question rejects wrong turn"
@@ -1580,8 +1581,8 @@
       (is (= :penalty (get-in mine [:banner :kind])))
       (is (= 2 (:penalty-draw-count mine)))
       (is (true? (:penalty? mine)))
-      (is (clojure.string/includes? (get-in mine [:banner :text]) "Play two to block"))
-      (is (clojure.string/includes? (get-in theirs [:banner :text]) "Waiting for"))))
+      (is (str/includes? (get-in mine [:banner :text]) "Play two to block"))
+      (is (str/includes? (get-in theirs [:banner :text]) "Waiting for"))))
 
   (testing "select-suit and suit-selected banners"
     (let [selecting (-> (make-test-game)
