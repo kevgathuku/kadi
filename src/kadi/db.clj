@@ -3,15 +3,17 @@
   (:require [next.jdbc :as jdbc]
             [next.jdbc.result-set :as rs]
             [jsonista.core :as json]
+            [clojure.string :as str]
             [kadi.cards :as cards]
             [kadi.game :as game]
             [kadi.schema :as schema]))
 
 (def ^:dynamic *db-spec* {:dbtype "sqlite" :dbname (or (System/getenv "DATABASE_PATH") "kadi.db")})
 
-(defn datasource []
+(defn datasource
   "Get or create a datasource for the current *db-spec*.
    Always reads *db-spec* so dynamic binding works correctly."
+  []
   (jdbc/get-datasource *db-spec*))
 
 (def ^:private json-mapper (json/object-mapper {:decode-key-fn keyword}))
@@ -92,11 +94,11 @@
                               {:builder-fn rs/as-unqualified-lower-maps})
           seen (atom #{})]
       (doseq [{:keys [id name]} (sort-by :id rows)]
-        (let [lower (clojure.string/lower-case (or name ""))]
+        (let [lower (str/lower-case (or name ""))]
           (if (contains? @seen lower)
             (loop [n 2]
               (let [candidate (str name n)
-                    candidate-lower (clojure.string/lower-case candidate)]
+                    candidate-lower (str/lower-case candidate)]
                 (if (contains? @seen candidate-lower)
                   (recur (inc n))
                   (do (jdbc/execute-one! ds ["UPDATE players SET name = ? WHERE id = ?" candidate id])
@@ -117,9 +119,9 @@
     (jdbc/execute! ds ["PRAGMA journal_mode=WAL"])
     ;; Create tables first, dedup legacy names, then indexes
     ;; (unique index on lower(name) fails on legacy duplicate names otherwise).
-    (let [stmts (->> (clojure.string/split schema #";")
-                     (map clojure.string/trim)
-                     (remove clojure.string/blank?))
+    (let [stmts (->> (str/split schema #";")
+                     (map str/trim)
+                     (remove str/blank?))
           {:keys [tables indexes]} (group-by #(if (re-find #"(?i)^CREATE\s+(UNIQUE\s+)?INDEX" %)
                                                 :indexes :tables) stmts)]
       (doseq [stmt tables]
